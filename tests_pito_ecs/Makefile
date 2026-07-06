@@ -1,12 +1,12 @@
 CC     = gcc
-CFLAGS = -std=c11 -g -Wall -Wextra -Wpedantic
+CFLAGS = -std=c11 -g -Wall -Wextra -Wpedantic -pthread
 
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
     CC = clang
 endif
 
-SRCS   = main.c entity.c systems.c deferred.c set.c
+SRCS   = main.c entity.c systems.c deferred.c set.c threads.c
 
 DEPS   = ../pito_ecs.h common.h
 OBJS   = $(SRCS:.c=.o)
@@ -17,7 +17,7 @@ all: tests
 	$(CC) -c -o $@ $< $(CFLAGS)
 
 tests: $(OBJS)
-	$(CC) -o tests $(OBJS) -lm
+	$(CC) -o tests $(OBJS) -lm -pthread
 
 .PHONY: clean
 

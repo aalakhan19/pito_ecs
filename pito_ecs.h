@@ -128,6 +128,10 @@
         - Components may now specify a default_value that is copied into the
           component on add.
 
+    - 3.5 (2026/07/06):
+        - ecs_t and its API are now safe to call concurrently from multiple
+          threads
+
     Usage:
     ------
 
@@ -158,6 +162,23 @@
 
     Must be defined before PITO_ECS_IMPLEMENTATION
 */
+
+
+#if !defined(__cplusplus)
+    #if defined(__STDC_NO_THREADS__)
+        // ECS_HAS_C11_THREADS intentionally left undefined; pthread fallback.
+    #elif defined(__has_include)
+        #if __has_include(<threads.h>)
+            #define ECS_HAS_C11_THREADS 1
+        #endif
+    #elif !defined(__APPLE__)
+        #define ECS_HAS_C11_THREADS 1
+    #endif
+
+    #if !defined(ECS_HAS_C11_THREADS) && !defined(_POSIX_C_SOURCE)
+        #define _POSIX_C_SOURCE 200809L
+    #endif
+#endif
 
 #ifndef PITO_ECS_H
 #define PITO_ECS_H
@@ -669,6 +690,50 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
 #define ECS_MEMSET           PITO_ECS_MEMSET
 #define ECS_MEMCPY           PITO_ECS_MEMCPY
 
+#if defined(__cplusplus)
+
+#include <mutex>
+
+typedef std::recursive_mutex* ecs_mtx_t;
+
+#define ECS_MTX_INIT(m)    (*(m) = new std::recursive_mutex())
+#define ECS_MTX_LOCK(m)    (*(m))->lock()
+#define ECS_MTX_UNLOCK(m)  (*(m))->unlock()
+#define ECS_MTX_DESTROY(m) delete *(m)
+
+#elif defined(ECS_HAS_C11_THREADS)
+
+#include <threads.h>
+
+typedef mtx_t ecs_mtx_t;
+
+#define ECS_MTX_INIT(m)    mtx_init((m), mtx_plain | mtx_recursive)
+#define ECS_MTX_LOCK(m)    mtx_lock(m)
+#define ECS_MTX_UNLOCK(m)  mtx_unlock(m)
+#define ECS_MTX_DESTROY(m) mtx_destroy(m)
+
+#else // Fallback for platforms without C11 <threads.h>
+
+#include <pthread.h>
+
+typedef pthread_mutex_t ecs_mtx_t;
+
+static void ecs_mtx_init_recursive(pthread_mutex_t* m)
+{
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(m, &attr);
+    pthread_mutexattr_destroy(&attr);
+}
+
+#define ECS_MTX_INIT(m)    ecs_mtx_init_recursive(m)
+#define ECS_MTX_LOCK(m)    pthread_mutex_lock(m)
+#define ECS_MTX_UNLOCK(m)  pthread_mutex_unlock(m)
+#define ECS_MTX_DESTROY(m) pthread_mutex_destroy(m)
+
+#endif
+
 /*=============================================================================
  *  Data structures
  *============================================================================*/
@@ -800,6 +865,7 @@ struct ecs_s
     ecs_cmd_array_t    cmd_queue;
     ecs_arena_t        arena;
     void*              mem_ctx;
+    ecs_mtx_t          lock;
 };
 
 /*=============================================================================
@@ -923,6 +989,8 @@ ecs_t* ecs_new(size_t entity_capacity, void* mem_ctx)
     ecs->system_active   = false;
     ecs->mem_ctx         = mem_ctx;
 
+    ECS_MTX_INIT(&ecs->lock);
+
     // Initialize entity pool and queues
     ecs_id_array_init(ecs, &ecs->entity_pool, entity_capacity);
 
@@ -973,12 +1041,17 @@ void ecs_free(ecs_t* ecs)
     }
 
     ECS_FREE(ecs->entities, ecs->mem_ctx);
+
+    ECS_MTX_DESTROY(&ecs->lock);
+
     ECS_FREE(ecs, ecs->mem_ctx);
 }
 
 void ecs_reset(ecs_t* ecs)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
+
+    ECS_MTX_LOCK(&ecs->lock);
 
     ecs->entity_pool.size = 0;
 
@@ -990,6 +1063,8 @@ void ecs_reset(ecs_t* ecs)
     {
         ecs->systems[sys_id].entity_ids.size = 0;
     }
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 ecs_comp_t ecs_define_component(ecs_t* ecs,
@@ -997,8 +1072,11 @@ ecs_comp_t ecs_define_component(ecs_t* ecs,
                                 const ecs_comp_desc_t* desc)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
-    ECS_ASSERT(ecs->comp_count < ECS_MAX_COMPONENTS);
     ECS_ASSERT(size > 0);
+
+    ECS_MTX_LOCK(&ecs->lock);
+
+    ECS_ASSERT(ecs->comp_count < ECS_MAX_COMPONENTS);
 
     ecs_comp_t comp = ecs_make_comp(ecs->comp_count);
 
@@ -1020,12 +1098,14 @@ ecs_comp_t ecs_define_component(ecs_t* ecs,
 
         if (desc->default_value)
         {
-            comp_data->default_value = ECS_MALLOC(size, ctx->mem_ctx);
+            comp_data->default_value = ECS_MALLOC(size, ecs->mem_ctx);
             ECS_MEMCPY(comp_data->default_value, desc->default_value, size);
         }
     }
 
     ecs->comp_count++;
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 
     return comp;
 }
@@ -1035,8 +1115,11 @@ ecs_system_t ecs_define_system(ecs_t* ecs,
                                const ecs_sys_desc_t* desc)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
-    ECS_ASSERT(ecs->system_count < ECS_MAX_SYSTEMS);
     ECS_ASSERT(NULL != system_cb);
+
+    ECS_MTX_LOCK(&ecs->lock);
+
+    ECS_ASSERT(ecs->system_count < ECS_MAX_SYSTEMS);
 
     ecs_system_t sys = ecs_make_system(ecs->system_count);
     ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
@@ -1058,6 +1141,8 @@ ecs_system_t ecs_define_system(ecs_t* ecs,
 
     ecs->system_count++;
 
+    ECS_MTX_UNLOCK(&ecs->lock);
+
     return sys;
 }
 
@@ -1066,12 +1151,17 @@ void ecs_require(ecs_t* ecs, ecs_system_t sys, ecs_comp_t comp)
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
     ECS_ASSERT(ecs_is_valid_component_id(comp.id));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
     ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
 
     // Set system component bit for the specified component
     ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
     ecs_bitset_flip(&sys_data->require_bits, comp.id, true);
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 void ecs_exclude(ecs_t* ecs, ecs_system_t sys, ecs_comp_t comp)
@@ -1079,32 +1169,47 @@ void ecs_exclude(ecs_t* ecs, ecs_system_t sys, ecs_comp_t comp)
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
     ECS_ASSERT(ecs_is_valid_component_id(comp.id));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
     ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
 
     // Set system component bit for the specified component
     ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
     ecs_bitset_flip(&sys_data->exclude_bits, comp.id, true);
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 void ecs_enable_system(ecs_t* ecs, ecs_system_t sys)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
     ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
     ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
     sys_data->active = true;
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 void ecs_disable_system(ecs_t* ecs, ecs_system_t sys)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
     ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
     ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
     sys_data->active = false;
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 void ecs_set_system_callbacks(ecs_t* ecs,
@@ -1115,72 +1220,105 @@ void ecs_set_system_callbacks(ecs_t* ecs,
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
-    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
     ECS_ASSERT(NULL != system_cb);
+
+    ECS_MTX_LOCK(&ecs->lock);
+
+    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
     ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
     sys_data->system_cb = system_cb;
     sys_data->on_join = on_join;
     sys_data->on_leave = on_leave;
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 void ecs_set_system_udata(ecs_t* ecs, ecs_system_t sys, void* udata)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
-    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
+    ECS_MTX_LOCK(&ecs->lock);
+
+    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
     ecs->systems[sys.id].udata = udata;
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 void* ecs_get_system_udata(ecs_t* ecs, ecs_system_t sys)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
-    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
-    return ecs->systems[sys.id].udata;
+    ECS_MTX_LOCK(&ecs->lock);
+
+    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
+    void* udata = ecs->systems[sys.id].udata;
+    ECS_MTX_UNLOCK(&ecs->lock);
+
+    return udata;
 }
 
 void ecs_set_system_mask(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
-    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
+    ECS_MTX_LOCK(&ecs->lock);
+
+    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
     ecs->systems[sys.id].mask = mask;
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 ecs_mask_t ecs_get_system_mask(ecs_t* ecs, ecs_system_t sys)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
-    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
-    return ecs->systems[sys.id].mask;
+    ECS_MTX_LOCK(&ecs->lock);
+
+    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
+    ecs_mask_t mask = ecs->systems[sys.id].mask;
+    ECS_MTX_UNLOCK(&ecs->lock);
+
+    return mask;
 }
 
 ecs_entity_t* ecs_get_entity_array(ecs_t* ecs, ecs_system_t sys)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
-    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
-    return ecs->systems[sys.id].entity_ids.dense;
+    ECS_MTX_LOCK(&ecs->lock);
+
+    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
+    ecs_entity_t* dense = ecs->systems[sys.id].entity_ids.dense;
+    ECS_MTX_UNLOCK(&ecs->lock);
+
+    return dense;
 }
 
 size_t ecs_get_entity_count(ecs_t* ecs, ecs_system_t sys)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
-    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
-    return ecs->systems[sys.id].entity_ids.size;
+    ECS_MTX_LOCK(&ecs->lock);
+
+    ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
+    size_t count = ecs->systems[sys.id].entity_ids.size;
+    ECS_MTX_UNLOCK(&ecs->lock);
+
+    return count;
 }
 
 ecs_entity_t ecs_create(ecs_t* ecs)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
+
+    ECS_MTX_LOCK(&ecs->lock);
 
     ecs_id_t entity_id = 0;
 
@@ -1215,6 +1353,8 @@ ecs_entity_t ecs_create(ecs_t* ecs)
     ecs->entities[entity_id].active = true;
     ecs->entities[entity_id].ready  = true;
 
+    ECS_MTX_UNLOCK(&ecs->lock);
+
     return ecs_make_entity(entity_id);
 }
 
@@ -1222,7 +1362,11 @@ bool ecs_is_ready(ecs_t* ecs, ecs_entity_t entity)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
 
-    return ecs->entities[entity.id].ready;
+    ECS_MTX_LOCK(&ecs->lock);
+    bool ready = ecs->entities[entity.id].ready;
+    ECS_MTX_UNLOCK(&ecs->lock);
+
+    return ready;
 }
 
 void ecs_set(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* data)
@@ -1230,6 +1374,9 @@ void ecs_set(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* data)
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_id(entity.id));
     ECS_ASSERT(ecs_is_valid_component_id(comp.id));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
     ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
 
@@ -1248,6 +1395,7 @@ void ecs_set(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* data)
         cmd->comp   = comp;
         cmd->data   = ecs_arena_alloc(ecs, &ecs->arena, comp_data->size);
         ECS_MEMCPY(cmd->data, data, comp_data->size);
+        ECS_MTX_UNLOCK(&ecs->lock);
         return;
     }
 
@@ -1257,16 +1405,24 @@ void ecs_set(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* data)
     // Callback
     if (comp_data->on_set)
         comp_data->on_set(ecs, entity, comp, comp_data->udata);
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 void ecs_destroy(ecs_t* ecs, ecs_entity_t entity)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_id(entity.id));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
     ECS_ASSERT(ecs_is_active(ecs, entity.id));
 
     if (!ecs_is_active(ecs, entity.id))
+    {
+        ECS_MTX_UNLOCK(&ecs->lock);
         return;
+    }
 
     ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
     ecs_bitset_t comp_bits = entity_data->comp_bits;
@@ -1277,6 +1433,7 @@ void ecs_destroy(ecs_t* ecs, ecs_entity_t entity)
         cmd->type   = ECS_CMD_DESTROY;
         cmd->entity = entity;
         ecs->entities[entity.id].ready = false;
+        ECS_MTX_UNLOCK(&ecs->lock);
         return;
     }
 
@@ -1302,6 +1459,8 @@ void ecs_destroy(ecs_t* ecs, ecs_entity_t entity)
     ECS_MEMSET(&entity_data->comp_bits, 0, sizeof(ecs_bitset_t));
     entity_data->active = false;
     entity_data->ready  = false;
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 bool ecs_has(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
@@ -1310,14 +1469,26 @@ bool ecs_has(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
     ECS_ASSERT(ecs_is_valid_id(entity.id));
     ECS_ASSERT(ecs_is_valid_component_id(comp.id));
 
+    ECS_MTX_LOCK(&ecs->lock);
+
     // Load entity data
     ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
 
-    if (!entity_data->ready)
-        return false;
+    bool result;
 
-    // Return true if the component belongs to the entity
-    return ecs_bitset_test(&entity_data->comp_bits, comp.id);
+    if (!entity_data->ready)
+    {
+        result = false;
+    }
+    else
+    {
+        // The component belongs to the entity if the corresponding bit is set
+        result = ecs_bitset_test(&entity_data->comp_bits, comp.id);
+    }
+
+    ECS_MTX_UNLOCK(&ecs->lock);
+
+    return result;
 }
 
 void* ecs_get(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
@@ -1325,6 +1496,9 @@ void* ecs_get(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_id(entity.id));
     ECS_ASSERT(ecs_is_valid_component_id(comp.id));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
     ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
 
@@ -1335,7 +1509,11 @@ void* ecs_get(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
     size_t block = entity.id / ECS_COMP_BLOCK_SIZE;
     size_t slot  = entity.id % ECS_COMP_BLOCK_SIZE;
 
-    return (char*)comp_blocks->blocks[block] + (comp_blocks->comp_size * slot);
+    void* ptr = (char*)comp_blocks->blocks[block] + (comp_blocks->comp_size * slot);
+
+    ECS_MTX_UNLOCK(&ecs->lock);
+
+    return ptr;
 }
 
 void ecs_add(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args)
@@ -1343,11 +1521,17 @@ void ecs_add(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args)
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_id(entity.id));
     ECS_ASSERT(ecs_is_valid_component_id(comp.id));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
     ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
 
     if (ecs_has(ecs, entity, comp))
+    {
+        ECS_MTX_UNLOCK(&ecs->lock);
         return;
+    }
 
     // Load entity data
     ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
@@ -1383,6 +1567,7 @@ void ecs_add(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args)
             ECS_MEMCPY(cmd->args, args, comp_data->args_size);
         }
 
+        ECS_MTX_UNLOCK(&ecs->lock);
         return;
     }
 
@@ -1401,6 +1586,8 @@ void ecs_add(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args)
 
     // Add/remove entity to/from systems based on matching criteria
     ecs_sync_add_remove(ecs, entity.id, comp.id);
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 void ecs_remove(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
@@ -1408,11 +1595,17 @@ void ecs_remove(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_id(entity.id));
     ECS_ASSERT(ecs_is_valid_component_id(comp.id));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
     ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
 
     if (!ecs_has(ecs, entity, comp))
+    {
+        ECS_MTX_UNLOCK(&ecs->lock);
         return;
+    }
 
     // Load entity data
     ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
@@ -1427,6 +1620,7 @@ void ecs_remove(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
         cmd->type   = ECS_CMD_REMOVE;
         cmd->entity = entity;
         cmd->comp   = comp;
+        ECS_MTX_UNLOCK(&ecs->lock);
         return;
     }
 
@@ -1438,21 +1632,32 @@ void ecs_remove(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
 
     // Add/remove entity to/from systems based on matching criteria
     ecs_sync_add_remove(ecs, entity.id, comp.id);
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 }
 
 ecs_ret_t ecs_run_system(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
     ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
     ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
 
     if (!sys_data->active)
+    {
+        ECS_MTX_UNLOCK(&ecs->lock);
         return 0;
+    }
 
     if (0 != sys_data->mask && !(sys_data->mask & mask))
+    {
+        ECS_MTX_UNLOCK(&ecs->lock);
         return 0;
+    }
 
     ecs->system_active = true;
 
@@ -1465,6 +1670,8 @@ ecs_ret_t ecs_run_system(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
 
     ecs_cmd_flush_queue(ecs);
     ecs_arena_reset(ecs, &ecs->arena);
+
+    ECS_MTX_UNLOCK(&ecs->lock);
 
     return code;
 }
