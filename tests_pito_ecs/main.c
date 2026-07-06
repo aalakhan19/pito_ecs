@@ -3,8 +3,8 @@
 #define PICO_UNIT_IMPLEMENTATION
 #include "../pico_unit.h"
 
-#define PICO_ECS_IMPLEMENTATION
-#include "../pico_ecs.h"
+#define PITO_ECS_IMPLEMENTATION
+#include "../pito_ecs.h"
 
 ecs_t* ecs = NULL;
 ecs_comp_t comp1;

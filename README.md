@@ -7,7 +7,7 @@ Library | Docs | Description | Version
 ------- | -----| ------------| -------
 **[pico_b64](pico_b64.h)**   | **[docs](https://empyreanx.github.io/docs/ph/pico__b64_8h.html)**  | Base64 encoding/decoding library             | 1.0
 **[pico_bvh](pico_bvh.h)**   | **[docs](https://empyreanx.github.io/docs/ph/pico__bvh_8h.html)**  | Dynamic 2D Bounding Volume Heirarchy (BVH)             | 0.1
-**[pico_ecs](pico_ecs.h)**   | **[docs](https://empyreanx.github.io/docs/ph/pico__ecs_8h.html)**  | Pure and simple ECS                          | 3.3
+**[pito_ecs](pito_ecs.h)**   | **[docs](https://empyreanx.github.io/docs/ph/pico__ecs_8h.html)**  | Pure and simple ECS                          | 3.3
 **[pico_font](pico_font.h)**  | **[docs](https://empyreanx.github.io/docs/ph/pico__font_8h.html)**  | A simple, dynamic (online) font atlas | 0.1
 **[pico_gfx](pico_gfx.h)**   | **[docs](https://empyreanx.github.io/docs/ph/pico__gfx_8h.html)**  | Graphics library based on sokol_gfx          | 0.1
 **[pico_hit](pico_hit.h)**   | **[docs](https://empyreanx.github.io/docs/ph/pico__hit_8h.html)**  | 2D collision detection (SAT) and ray casting | 0.4
@@ -25,6 +25,6 @@ The examples and tests compile and run on Linux (GCC), Windows (MSYS2/MinGW64), 
 
 Most libraries are licensed under your choice of zlib or the public domain. The remaining libraries are licensed under the MIT license.
 
-Deprecated libraries (pico_gl, pico_sat, pico_math 1.0, and pico_ecs 2.4) can be found [here](https://github.com/empyreanx/pico_headers_deprecated)
+Deprecated libraries (pico_gl, pico_sat, pico_math 1.0, and pito_ecs 2.4) can be found [here](https://github.com/empyreanx/pico_headers_deprecated)
 
 I give my thanks to [Randy Gaul](https://github.com/RandyGaul) for inspiration, answering my questions, and the template for this project.

@@ -13,11 +13,23 @@ jobs:
       fail-fast: false
       matrix:
         platform:
-          - { name: Windows (mingw32), os: windows-latest, shell: 'msys2 {0}', msystem: mingw32, msys-env: mingw-w64-i686 }
-          - { name: Windows (mingw64), os: windows-latest, shell: 'msys2 {0}', msystem: mingw64, msys-env: mingw-w64-x86_64 }
-          - { name: Linux,             os: ubuntu-latest,  shell: bash }
-          - { name: MacOS,             os: macos-latest,   shell: bash }
-        test-dirs: [examples_pico_ecs, examples_pico_log, examples_pico_unit]
+          - {
+              name: Windows (mingw32),
+              os: windows-latest,
+              shell: "msys2 {0}",
+              msystem: mingw32,
+              msys-env: mingw-w64-i686,
+            }
+          - {
+              name: Windows (mingw64),
+              os: windows-latest,
+              shell: "msys2 {0}",
+              msystem: mingw64,
+              msys-env: mingw-w64-x86_64,
+            }
+          - { name: Linux, os: ubuntu-latest, shell: bash }
+          - { name: MacOS, os: macos-latest, shell: bash }
+        test-dirs: [examples_pito_ecs, examples_pico_log, examples_pico_unit]
     steps:
       - name: Set up MSYS2
         if: matrix.platform.shell == 'msys2 {0}'

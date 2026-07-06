@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../pico_ecs.h"
+#include "../pito_ecs.h"
 #include "../pico_unit.h"
 
 #define MIN_ENTITIES (1 * 1024)

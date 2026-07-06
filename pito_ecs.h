@@ -1,5 +1,5 @@
 /**
-    @file pico_ecs.h
+    @file pito_ecs.h
     @brief A pure and simple ECS
 
     ----------------------------------------------------------------------------
@@ -133,8 +133,8 @@
 
     To use this library in your project, add the following
 
-    > #define PICO_ECS_IMPLEMENTATION
-    > #include "pico_ecs.h"
+    > #define PITO_ECS_IMPLEMENTATION
+    > #include "pito_ecs.h"
 
     to a source file (once), then simply include the header normally.
 
@@ -152,15 +152,15 @@
     Constants:
     --------
 
-    - PICO_ECS_MAX_COMPONENTS  (default: 32)
-    - PICO_ECS_MAX_SYSTEMS     (default: 16)
-    - PICO_ECS_COMP_BLOCK_SIZE (default: 64)
+    - PITO_ECS_MAX_COMPONENTS  (default: 32)
+    - PITO_ECS_MAX_SYSTEMS     (default: 16)
+    - PITO_ECS_COMP_BLOCK_SIZE (default: 64)
 
-    Must be defined before PICO_ECS_IMPLEMENTATION
+    Must be defined before PITO_ECS_IMPLEMENTATION
 */
 
-#ifndef PICO_ECS_H
-#define PICO_ECS_H
+#ifndef PITO_ECS_H
+#define PITO_ECS_H
 
 #include <stdbool.h> // bool, true, false
 #include <stddef.h>  // size_t
@@ -611,46 +611,46 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
 }
 #endif
 
-#endif // PICO_ECS_H
+#endif // PITO_ECS_H
 
-#ifdef PICO_ECS_IMPLEMENTATION // Define once
+#ifdef PITO_ECS_IMPLEMENTATION // Define once
 
-#ifndef PICO_ECS_MAX_COMPONENTS
-#define PICO_ECS_MAX_COMPONENTS 32
+#ifndef PITO_ECS_MAX_COMPONENTS
+#define PITO_ECS_MAX_COMPONENTS 32
 #endif
 
-#ifndef PICO_ECS_MAX_SYSTEMS
-#define PICO_ECS_MAX_SYSTEMS 16
+#ifndef PITO_ECS_MAX_SYSTEMS
+#define PITO_ECS_MAX_SYSTEMS 16
 #endif
 
-#ifndef PICO_ECS_COMP_BLOCK_SIZE
-#define PICO_ECS_COMP_BLOCK_SIZE 64
+#ifndef PITO_ECS_COMP_BLOCK_SIZE
+#define PITO_ECS_COMP_BLOCK_SIZE 64
 #endif
 
 #ifdef NDEBUG
-    #define PICO_ECS_ASSERT(expr) ((void)0)
+    #define PITO_ECS_ASSERT(expr) ((void)0)
 #else
-    #ifndef PICO_ECS_ASSERT
+    #ifndef PITO_ECS_ASSERT
         #include <assert.h>
-        #define PICO_ECS_ASSERT(expr) (assert(expr))
+        #define PITO_ECS_ASSERT(expr) (assert(expr))
     #endif
 #endif
 
-#if !defined(PICO_ECS_MALLOC) || !defined(PICO_ECS_REALLOC) || !defined(PICO_ECS_FREE)
+#if !defined(PITO_ECS_MALLOC) || !defined(PITO_ECS_REALLOC) || !defined(PITO_ECS_FREE)
 #include <stdlib.h>
-#define PICO_ECS_MALLOC(size, ctx)       (malloc(size))
-#define PICO_ECS_REALLOC(ptr, size, ctx) (realloc(ptr, size))
-#define PICO_ECS_FREE(ptr, ctx)          (free(ptr))
+#define PITO_ECS_MALLOC(size, ctx)       (malloc(size))
+#define PITO_ECS_REALLOC(ptr, size, ctx) (realloc(ptr, size))
+#define PITO_ECS_FREE(ptr, ctx)          (free(ptr))
 #endif
 
-#ifndef PICO_ECS_MEMSET
+#ifndef PITO_ECS_MEMSET
     #include <string.h>
-    #define PICO_ECS_MEMSET memset
+    #define PITO_ECS_MEMSET memset
 #endif
 
-#ifndef PICO_ECS_MEMCPY
+#ifndef PITO_ECS_MEMCPY
     #include <string.h>
-    #define PICO_ECS_MEMCPY memcpy
+    #define PITO_ECS_MEMCPY memcpy
 #endif
 
 #include <stdalign.h>
@@ -659,15 +659,15 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
  *  Aliases>
  *============================================================================*/
 
-#define ECS_ASSERT           PICO_ECS_ASSERT
-#define ECS_MAX_COMPONENTS   PICO_ECS_MAX_COMPONENTS
-#define ECS_MAX_SYSTEMS      PICO_ECS_MAX_SYSTEMS
-#define ECS_COMP_BLOCK_SIZE  PICO_ECS_COMP_BLOCK_SIZE
-#define ECS_MALLOC           PICO_ECS_MALLOC
-#define ECS_REALLOC          PICO_ECS_REALLOC
-#define ECS_FREE             PICO_ECS_FREE
-#define ECS_MEMSET           PICO_ECS_MEMSET
-#define ECS_MEMCPY           PICO_ECS_MEMCPY
+#define ECS_ASSERT           PITO_ECS_ASSERT
+#define ECS_MAX_COMPONENTS   PITO_ECS_MAX_COMPONENTS
+#define ECS_MAX_SYSTEMS      PITO_ECS_MAX_SYSTEMS
+#define ECS_COMP_BLOCK_SIZE  PITO_ECS_COMP_BLOCK_SIZE
+#define ECS_MALLOC           PITO_ECS_MALLOC
+#define ECS_REALLOC          PITO_ECS_REALLOC
+#define ECS_FREE             PITO_ECS_FREE
+#define ECS_MEMSET           PITO_ECS_MEMSET
+#define ECS_MEMCPY           PITO_ECS_MEMCPY
 
 /*=============================================================================
  *  Data structures
@@ -2321,7 +2321,7 @@ static bool ecs_is_system_ready(ecs_t* ecs, ecs_id_t sys_id)
 
 #endif // NDEBUG
 
-#endif // PICO_ECS_IMPLEMENTATION
+#endif // PITO_ECS_IMPLEMENTATION
 
 /*
     ----------------------------------------------------------------------------

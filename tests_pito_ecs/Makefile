@@ -8,7 +8,7 @@ endif
 
 SRCS   = main.c entity.c systems.c deferred.c set.c
 
-DEPS   = ../pico_ecs.h common.h
+DEPS   = ../pito_ecs.h common.h
 OBJS   = $(SRCS:.c=.o)
 
 all: tests
