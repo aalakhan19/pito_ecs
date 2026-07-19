@@ -1,6 +1,8 @@
 #include "common.h"
 
+#include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 
 #if defined(__STDC_NO_THREADS__)
     // TEST_HAS_C11_THREADS intentionally left undefined; pthread fallback.
@@ -114,6 +116,45 @@ static int run_system_worker(void* arg)
     return 0;
 }
 
+// --- Helpers (owned_update parallelism) ---------------------------------
+
+#define TEST_OWNED_UPDATE_ENTITIES   20000
+#define TEST_OWNED_UPDATE_WORK_ITERS 500
+
+typedef struct
+{
+    ecs_comp_t comp;
+    size_t     work_iterations;
+} owned_update_ctx_t;
+
+static ecs_ret_t owned_update_system(ecs_t* ecs,
+                                     ecs_entity_t* entities,
+                                     size_t entity_count,
+                                     void* udata)
+{
+    owned_update_ctx_t* ctx = (owned_update_ctx_t*)udata;
+
+    for (size_t i = 0; i < entity_count; i++)
+    {
+        comp_t* c = (comp_t*)ecs_get(ecs, entities[i], ctx->comp);
+
+        volatile double acc = 0.0;
+        for (size_t j = 0; j < ctx->work_iterations; j++)
+            acc += (double)j * 1.0000001;
+        (void)acc;
+
+        c->used = true;
+    }
+
+    return 0;
+}
+
+static double test_elapsed_seconds(struct timespec start, struct timespec end)
+{
+    return (double)(end.tv_sec - start.tv_sec) +
+           (double)(end.tv_nsec - start.tv_nsec) / 1e9;
+}
+
 TEST_CASE(test_concurrent_create_and_add)
 {
     sys1 = ecs_define_system(ecs, noop_system, NULL);
@@ -164,8 +205,99 @@ TEST_CASE(test_concurrent_run_system)
     return true;
 }
 
+TEST_CASE(test_owned_update_parallel_correctness)
+{
+    sys1 = ecs_define_system(ecs, owned_update_system, &(ecs_sys_desc_t){ .owned_update = true });
+    sys2 = ecs_define_system(ecs, owned_update_system, &(ecs_sys_desc_t){ .owned_update = true });
+
+    ecs_require(ecs, sys1, comp1);
+    ecs_require(ecs, sys2, comp2);
+
+    owned_update_ctx_t ctx1 = { .comp = comp1, .work_iterations = TEST_OWNED_UPDATE_WORK_ITERS };
+    owned_update_ctx_t ctx2 = { .comp = comp2, .work_iterations = TEST_OWNED_UPDATE_WORK_ITERS };
+    ecs_set_system_udata(ecs, sys1, &ctx1);
+    ecs_set_system_udata(ecs, sys2, &ctx2);
+
+    for (int i = 0; i < TEST_OWNED_UPDATE_ENTITIES; i++)
+    {
+        ecs_entity_t entity = ecs_create(ecs);
+        ecs_add(ecs, entity, comp1, NULL);
+        ecs_add(ecs, entity, comp2, NULL);
+    }
+
+    test_thread_t t1, t2;
+
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t1, run_system_worker, &sys1));
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t2, run_system_worker, &sys2));
+
+    TEST_THREAD_JOIN(t1);
+    TEST_THREAD_JOIN(t2);
+
+    size_t count = ecs_get_entity_count(ecs, sys1);
+    REQUIRE(count == (size_t)TEST_OWNED_UPDATE_ENTITIES);
+    REQUIRE(ecs_get_entity_count(ecs, sys2) == (size_t)TEST_OWNED_UPDATE_ENTITIES);
+
+    ecs_entity_t* entities = ecs_get_entity_array(ecs, sys1);
+
+    for (size_t i = 0; i < count; i++)
+    {
+        REQUIRE(((comp_t*)ecs_get(ecs, entities[i], comp1))->used);
+        REQUIRE(((comp_t*)ecs_get(ecs, entities[i], comp2))->used);
+    }
+
+    return true;
+}
+
+
+TEST_CASE(test_owned_update_parallel_speedup)
+{
+    sys1 = ecs_define_system(ecs, owned_update_system, &(ecs_sys_desc_t){ .owned_update = true });
+    sys2 = ecs_define_system(ecs, owned_update_system, &(ecs_sys_desc_t){ .owned_update = true });
+
+    ecs_require(ecs, sys1, comp1);
+    ecs_require(ecs, sys2, comp2);
+
+    owned_update_ctx_t ctx1 = { .comp = comp1, .work_iterations = TEST_OWNED_UPDATE_WORK_ITERS };
+    owned_update_ctx_t ctx2 = { .comp = comp2, .work_iterations = TEST_OWNED_UPDATE_WORK_ITERS };
+    ecs_set_system_udata(ecs, sys1, &ctx1);
+    ecs_set_system_udata(ecs, sys2, &ctx2);
+
+    for (int i = 0; i < TEST_OWNED_UPDATE_ENTITIES; i++)
+    {
+        ecs_entity_t entity = ecs_create(ecs);
+        ecs_add(ecs, entity, comp1, NULL);
+        ecs_add(ecs, entity, comp2, NULL);
+    }
+
+    struct timespec start, mid, end;
+
+    timespec_get(&start, TIME_UTC);
+    ecs_run_system(ecs, sys1, 0);
+    ecs_run_system(ecs, sys2, 0);
+    timespec_get(&mid, TIME_UTC);
+
+    test_thread_t t1, t2;
+
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t1, run_system_worker, &sys1));
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t2, run_system_worker, &sys2));
+
+    TEST_THREAD_JOIN(t1);
+    TEST_THREAD_JOIN(t2);
+    timespec_get(&end, TIME_UTC);
+
+    double serial_s   = test_elapsed_seconds(start, mid);
+    double parallel_s = test_elapsed_seconds(mid, end);
+
+    printf("owned_update timing: serial=%.4fs parallel=%.4fs (%.2fx)\n",
+           serial_s, parallel_s, parallel_s > 0.0 ? serial_s / parallel_s : 0.0);
+
+    return true;
+}
+
 TEST_SUITE(suite_threads)
 {
     RUN_TEST_CASE(test_concurrent_create_and_add);
     RUN_TEST_CASE(test_concurrent_run_system);
+    RUN_TEST_CASE(test_owned_update_parallel_correctness);
+    RUN_TEST_CASE(test_owned_update_parallel_speedup);
 }

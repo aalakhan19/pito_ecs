@@ -393,6 +393,7 @@ typedef void (*ecs_on_leave_fn)(ecs_t* ecs, ecs_entity_t entity, void* udata);
  * @param on_join_cb  Called when an entity is added to the system (can be NULL)
  * @param on_leave_cb Called when an entity is removed from the system (can be NULL)
  * @param udata       User data passed to callbacks (can be NULL)
+ * @param owned_update
  */
 typedef struct
 {
@@ -400,6 +401,7 @@ typedef struct
     ecs_on_join_fn on_join_cb;
     ecs_on_leave_fn on_leave_cb;
     void* udata;
+    bool owned_update;
 } ecs_sys_desc_t;
 
 /**
@@ -824,6 +826,7 @@ typedef struct
     ecs_bitset_t     require_bits;
     ecs_bitset_t     exclude_bits;
     void*            udata;
+    bool             owned_update;
 } ecs_sys_data_t;
 
 typedef enum
@@ -866,6 +869,8 @@ struct ecs_s
     ecs_arena_t        arena;
     void*              mem_ctx;
     ecs_mtx_t          lock;
+    ecs_mtx_t          comp_lock[ECS_MAX_COMPONENTS]; // guards comp_blocks[i]->blocks growth/lookup
+    ecs_mtx_t          entity_lock;                   // guards the entities array (data + growth)
 };
 
 /*=============================================================================
@@ -990,6 +995,10 @@ ecs_t* ecs_new(size_t entity_capacity, void* mem_ctx)
     ecs->mem_ctx         = mem_ctx;
 
     ECS_MTX_INIT(&ecs->lock);
+    ECS_MTX_INIT(&ecs->entity_lock);
+
+    for (size_t i = 0; i < ECS_MAX_COMPONENTS; i++)
+        ECS_MTX_INIT(&ecs->comp_lock[i]);
 
     // Initialize entity pool and queues
     ecs_id_array_init(ecs, &ecs->entity_pool, entity_capacity);
@@ -1043,6 +1052,10 @@ void ecs_free(ecs_t* ecs)
     ECS_FREE(ecs->entities, ecs->mem_ctx);
 
     ECS_MTX_DESTROY(&ecs->lock);
+    ECS_MTX_DESTROY(&ecs->entity_lock);
+
+    for (size_t i = 0; i < ECS_MAX_COMPONENTS; i++)
+        ECS_MTX_DESTROY(&ecs->comp_lock[i]);
 
     ECS_FREE(ecs, ecs->mem_ctx);
 }
@@ -1137,6 +1150,7 @@ ecs_system_t ecs_define_system(ecs_t* ecs,
         sys_data->on_join = desc->on_join_cb;
         sys_data->on_leave = desc->on_leave_cb;
         sys_data->udata = desc->udata;
+        sys_data->owned_update = desc->owned_update;
     }
 
     ecs->system_count++;
@@ -1322,6 +1336,8 @@ ecs_entity_t ecs_create(ecs_t* ecs)
 
     ecs_id_t entity_id = 0;
 
+    ECS_MTX_LOCK(&ecs->entity_lock);
+
     // If there is an ID in the pool, pop it
     ecs_id_array_t* pool = &ecs->entity_pool;
 
@@ -1352,6 +1368,8 @@ ecs_entity_t ecs_create(ecs_t* ecs)
     // Activate the entity and return a handle
     ecs->entities[entity_id].active = true;
     ecs->entities[entity_id].ready  = true;
+
+    ECS_MTX_UNLOCK(&ecs->entity_lock);
 
     ECS_MTX_UNLOCK(&ecs->lock);
 
@@ -1425,14 +1443,19 @@ void ecs_destroy(ecs_t* ecs, ecs_entity_t entity)
     }
 
     ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
+
+    ECS_MTX_LOCK(&ecs->entity_lock);
     ecs_bitset_t comp_bits = entity_data->comp_bits;
+    ECS_MTX_UNLOCK(&ecs->entity_lock);
 
     if (ecs->system_active)
     {
         ecs_cmd_t* cmd = ecs_cmd_array_push(ecs, &ecs->cmd_queue);
         cmd->type   = ECS_CMD_DESTROY;
         cmd->entity = entity;
-        ecs->entities[entity.id].ready = false;
+        ECS_MTX_LOCK(&ecs->entity_lock);
+        entity_data->ready = false;
+        ECS_MTX_UNLOCK(&ecs->entity_lock);
         ECS_MTX_UNLOCK(&ecs->lock);
         return;
     }
@@ -1456,9 +1479,11 @@ void ecs_destroy(ecs_t* ecs, ecs_entity_t entity)
     ecs_id_array_t* pool = &ecs->entity_pool;
     ecs_id_array_push(ecs, pool, entity.id);
 
+    ECS_MTX_LOCK(&ecs->entity_lock);
     ECS_MEMSET(&entity_data->comp_bits, 0, sizeof(ecs_bitset_t));
     entity_data->active = false;
     entity_data->ready  = false;
+    ECS_MTX_UNLOCK(&ecs->entity_lock);
 
     ECS_MTX_UNLOCK(&ecs->lock);
 }
@@ -1469,7 +1494,8 @@ bool ecs_has(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
     ECS_ASSERT(ecs_is_valid_id(entity.id));
     ECS_ASSERT(ecs_is_valid_component_id(comp.id));
 
-    ECS_MTX_LOCK(&ecs->lock);
+    
+    ECS_MTX_LOCK(&ecs->entity_lock);
 
     // Load entity data
     ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
@@ -1486,7 +1512,7 @@ bool ecs_has(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
         result = ecs_bitset_test(&entity_data->comp_bits, comp.id);
     }
 
-    ECS_MTX_UNLOCK(&ecs->lock);
+    ECS_MTX_UNLOCK(&ecs->entity_lock);
 
     return result;
 }
@@ -1497,7 +1523,8 @@ void* ecs_get(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
     ECS_ASSERT(ecs_is_valid_id(entity.id));
     ECS_ASSERT(ecs_is_valid_component_id(comp.id));
 
-    ECS_MTX_LOCK(&ecs->lock);
+
+    ECS_MTX_LOCK(&ecs->comp_lock[comp.id]);
 
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
     ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
@@ -1511,7 +1538,7 @@ void* ecs_get(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
 
     void* ptr = (char*)comp_blocks->blocks[block] + (comp_blocks->comp_size * slot);
 
-    ECS_MTX_UNLOCK(&ecs->lock);
+    ECS_MTX_UNLOCK(&ecs->comp_lock[comp.id]);
 
     return ptr;
 }
@@ -1533,20 +1560,22 @@ void ecs_add(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args)
         return;
     }
 
-    // Load entity data
+    ECS_MTX_LOCK(&ecs->entity_lock);
     ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
-
-    // Set entity component bit that determines which systems this entity
-    // belongs to
     ecs_bitset_flip(&entity_data->comp_bits, comp.id, true);
+    ECS_MTX_UNLOCK(&ecs->entity_lock);
 
     // Load component
     ecs_comp_blocks_t* comp_blocks = &ecs->comp_blocks[comp.id];
 
     // Grow the component array now (not deferred) so that ecs_get can safely
     // index into it immediately, since ecs_has already reports the component
-    // as present as soon as the bit above is flipped
+    // as present as soon as the bit above is flipped. Guarded by
+    // comp_lock[comp.id] so this stays correct against ecs_get reading
+    // comp_blocks->blocks[block] under the same lock from another thread.
+    ECS_MTX_LOCK(&ecs->comp_lock[comp.id]);
     ecs_comp_blocks_resize(ecs, comp_blocks, entity.id);
+    ECS_MTX_UNLOCK(&ecs->comp_lock[comp.id]);
 
     ecs_comp_data_t* comp_data = &ecs->comps[comp.id];
 
@@ -1607,12 +1636,11 @@ void ecs_remove(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
         return;
     }
 
-    // Load entity data
-    ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
-
     // Set entity component bit that determines which systems this entity
-    // belongs to
-    ecs_bitset_flip(&entity_data->comp_bits, comp.id, false);
+    // belongs to.
+    ECS_MTX_LOCK(&ecs->entity_lock);
+    ecs_bitset_flip(&ecs->entities[entity.id].comp_bits, comp.id, false);
+    ECS_MTX_UNLOCK(&ecs->entity_lock);
 
     if (ecs->system_active)
     {
@@ -1641,11 +1669,28 @@ ecs_ret_t ecs_run_system(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
 
+
+    ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
+
+    if (sys_data->owned_update)
+    {
+        ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
+
+        if (!sys_data->active)
+            return 0;
+
+        if (0 != sys_data->mask && !(sys_data->mask & mask))
+            return 0;
+
+        return sys_data->system_cb(ecs,
+                                   sys_data->entity_ids.dense,
+                                   sys_data->entity_ids.size,
+                                   sys_data->udata);
+    }
+
     ECS_MTX_LOCK(&ecs->lock);
 
     ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
-
-    ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
 
     if (!sys_data->active)
     {
