@@ -394,6 +394,7 @@ typedef void (*ecs_on_leave_fn)(ecs_t* ecs, ecs_entity_t entity, void* udata);
  * @param on_leave_cb Called when an entity is removed from the system (can be NULL)
  * @param udata       User data passed to callbacks (can be NULL)
  * @param owned_update
+ * @param owned_initialize
  */
 typedef struct
 {
@@ -402,6 +403,7 @@ typedef struct
     ecs_on_leave_fn on_leave_cb;
     void* udata;
     bool owned_update;
+    bool owned_initialize;
 } ecs_sys_desc_t;
 
 /**
@@ -525,6 +527,16 @@ size_t ecs_get_entity_count(ecs_t* ecs, ecs_system_t sys);
  * @returns The new entity
  */
 ecs_entity_t ecs_create(ecs_t* ecs);
+
+/**
+ * @brief Creates an entity, safe to call concurrently from an owned_initialize
+ * system
+ *
+ * @param ecs The ECS context
+ *
+ * @returns The new entity
+ */
+ecs_entity_t ecs_create_owned(ecs_t* ecs);
 
 /**
  * @brief Returns true if the entity is currently active and has not been queued
@@ -736,6 +748,30 @@ static void ecs_mtx_init_recursive(pthread_mutex_t* m)
 
 #endif
 
+#if defined(__cplusplus)
+
+#include <atomic>
+
+typedef std::atomic<size_t>* ecs_atomic_size_t;
+
+#define ECS_ATOMIC_INIT(a, v)      (*(a) = new std::atomic<size_t>(v))
+#define ECS_ATOMIC_DESTROY(a)      (delete *(a))
+#define ECS_ATOMIC_STORE(a, v)     ((*(a))->store((v)))
+#define ECS_ATOMIC_FETCH_ADD(a, v) ((*(a))->fetch_add((v)))
+
+#else
+
+#include <stdatomic.h>
+
+typedef atomic_size_t ecs_atomic_size_t;
+
+#define ECS_ATOMIC_INIT(a, v)      (atomic_init((a), (v)))
+#define ECS_ATOMIC_DESTROY(a)      ((void)0)
+#define ECS_ATOMIC_STORE(a, v)     (atomic_store((a), (v)))
+#define ECS_ATOMIC_FETCH_ADD(a, v) (atomic_fetch_add((a), (v)))
+
+#endif
+
 /*=============================================================================
  *  Data structures
  *============================================================================*/
@@ -827,6 +863,7 @@ typedef struct
     ecs_bitset_t     exclude_bits;
     void*            udata;
     bool             owned_update;
+    bool             owned_initialize;
 } ecs_sys_data_t;
 
 typedef enum
@@ -858,7 +895,7 @@ struct ecs_s
     ecs_id_array_t     entity_pool;
     ecs_entity_data_t* entities;
     size_t             entity_capacity;
-    size_t             next_entity_id;
+    ecs_atomic_size_t  next_entity_id;
     ecs_comp_data_t    comps[ECS_MAX_COMPONENTS];
     ecs_comp_blocks_t  comp_blocks[ECS_MAX_COMPONENTS];
     size_t             comp_count;
@@ -990,7 +1027,7 @@ ecs_t* ecs_new(size_t entity_capacity, void* mem_ctx)
     ECS_MEMSET(ecs, 0, sizeof(ecs_t));
 
     ecs->entity_capacity = (entity_capacity > 0) ? entity_capacity : 32;
-    ecs->next_entity_id  = 0;
+    ECS_ATOMIC_INIT(&ecs->next_entity_id, 0);
     ecs->system_active   = false;
     ecs->mem_ctx         = mem_ctx;
 
@@ -1051,6 +1088,8 @@ void ecs_free(ecs_t* ecs)
 
     ECS_FREE(ecs->entities, ecs->mem_ctx);
 
+    ECS_ATOMIC_DESTROY(&ecs->next_entity_id);
+
     ECS_MTX_DESTROY(&ecs->lock);
     ECS_MTX_DESTROY(&ecs->entity_lock);
 
@@ -1070,7 +1109,7 @@ void ecs_reset(ecs_t* ecs)
 
     ECS_MEMSET(ecs->entities, 0, ecs->entity_capacity * sizeof(ecs_entity_data_t));
 
-    ecs->next_entity_id = 0;
+    ECS_ATOMIC_STORE(&ecs->next_entity_id, 0);
 
     for (ecs_id_t sys_id = 0; sys_id < ecs->system_count; sys_id++)
     {
@@ -1151,6 +1190,7 @@ ecs_system_t ecs_define_system(ecs_t* ecs,
         sys_data->on_leave = desc->on_leave_cb;
         sys_data->udata = desc->udata;
         sys_data->owned_update = desc->owned_update;
+        sys_data->owned_initialize = desc->owned_initialize;
     }
 
     ecs->system_count++;
@@ -1348,7 +1388,7 @@ ecs_entity_t ecs_create(ecs_t* ecs)
     else
     {
         // Otherwise, issue a fresh ID
-        entity_id = ecs->next_entity_id++;
+        entity_id = (ecs_id_t)ECS_ATOMIC_FETCH_ADD(&ecs->next_entity_id, 1);
 
         // Grow the entities array if necessary
         if (entity_id >= ecs->entity_capacity)
@@ -1372,6 +1412,20 @@ ecs_entity_t ecs_create(ecs_t* ecs)
     ECS_MTX_UNLOCK(&ecs->entity_lock);
 
     ECS_MTX_UNLOCK(&ecs->lock);
+
+    return ecs_make_entity(entity_id);
+}
+
+ecs_entity_t ecs_create_owned(ecs_t* ecs)
+{
+    ECS_ASSERT(ecs_is_not_null(ecs));
+
+    ecs_id_t entity_id = (ecs_id_t)ECS_ATOMIC_FETCH_ADD(&ecs->next_entity_id, 1);
+
+    ECS_ASSERT((size_t)entity_id < ecs->entity_capacity);
+
+    ecs->entities[entity_id].active = true;
+    ecs->entities[entity_id].ready  = true;
 
     return ecs_make_entity(entity_id);
 }
@@ -1672,7 +1726,7 @@ ecs_ret_t ecs_run_system(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
 
     ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
 
-    if (sys_data->owned_update)
+    if (sys_data->owned_update || sys_data->owned_initialize)
     {
         ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 

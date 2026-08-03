@@ -161,6 +161,50 @@ static double test_elapsed_seconds(struct timespec start, struct timespec end)
            (double)(end.tv_nsec - start.tv_nsec) / 1e9;
 }
 
+// --- Helpers (owned_initialize parallelism) ------------------------------
+
+#define TEST_OWNED_INITIALIZE_COUNT             1000
+#define TEST_OWNED_INITIALIZE_CAPACITY          4096
+
+#define TEST_OWNED_INITIALIZE_SPEEDUP_COUNT     500000
+#define TEST_OWNED_INITIALIZE_SPEEDUP_CAPACITY  2000000
+
+#define TEST_OWNED_INITIALIZE_WORK_COUNT        5000
+#define TEST_OWNED_INITIALIZE_WORK_ITERS        500
+
+typedef struct
+{
+    int count;
+    size_t work_iterations;
+    ecs_entity_t* out;
+} owned_initialize_ctx_t;
+
+static ecs_ret_t owned_initialize_system(ecs_t* ecs,
+                                         ecs_entity_t* entities,
+                                         size_t entity_count,
+                                         void* udata)
+{
+    (void)entities;
+    (void)entity_count;
+
+    owned_initialize_ctx_t* ctx = (owned_initialize_ctx_t*)udata;
+
+    for (int i = 0; i < ctx->count; i++)
+    {
+        ecs_entity_t entity = ecs_create_owned(ecs);
+
+        if (ctx->out)
+            ctx->out[i] = entity;
+
+        volatile double acc = 0.0;
+        for (size_t j = 0; j < ctx->work_iterations; j++)
+            acc += (double)j * 1.0000001;
+        (void)acc;
+    }
+
+    return 0;
+}
+
 TEST_CASE(test_concurrent_create_and_add)
 {
     sys1 = ecs_define_system(ecs, noop_system, NULL);
@@ -400,6 +444,136 @@ TEST_CASE(test_owned_update_concurrent_structural_change_race)
     return true;
 }
 
+TEST_CASE(test_owned_initialize_parallel_correctness)
+{
+    ecs_free(ecs);
+    ecs = ecs_new(TEST_OWNED_INITIALIZE_CAPACITY, NULL);
+
+    ecs_entity_t out1[TEST_OWNED_INITIALIZE_COUNT];
+    ecs_entity_t out2[TEST_OWNED_INITIALIZE_COUNT];
+
+    owned_initialize_ctx_t ctx1 = { .count = TEST_OWNED_INITIALIZE_COUNT, .out = out1 };
+    owned_initialize_ctx_t ctx2 = { .count = TEST_OWNED_INITIALIZE_COUNT, .out = out2 };
+
+    sys1 = ecs_define_system(ecs, owned_initialize_system,
+                             &(ecs_sys_desc_t){ .owned_initialize = true, .udata = &ctx1 });
+    sys2 = ecs_define_system(ecs, owned_initialize_system,
+                             &(ecs_sys_desc_t){ .owned_initialize = true, .udata = &ctx2 });
+
+    test_thread_t t1, t2;
+
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t1, run_system_worker, &sys1));
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t2, run_system_worker, &sys2));
+
+    TEST_THREAD_JOIN(t1);
+    TEST_THREAD_JOIN(t2);
+
+    bool seen[TEST_OWNED_INITIALIZE_COUNT * 2] = { false };
+
+    for (int i = 0; i < TEST_OWNED_INITIALIZE_COUNT; i++)
+    {
+        REQUIRE(ecs_is_ready(ecs, out1[i]));
+        REQUIRE(out1[i].id < (ecs_id_t)(TEST_OWNED_INITIALIZE_COUNT * 2));
+        REQUIRE(!seen[out1[i].id]);
+        seen[out1[i].id] = true;
+    }
+
+    for (int i = 0; i < TEST_OWNED_INITIALIZE_COUNT; i++)
+    {
+        REQUIRE(ecs_is_ready(ecs, out2[i]));
+        REQUIRE(out2[i].id < (ecs_id_t)(TEST_OWNED_INITIALIZE_COUNT * 2));
+        REQUIRE(!seen[out2[i].id]);
+        seen[out2[i].id] = true;
+    }
+
+    for (int i = 0; i < TEST_OWNED_INITIALIZE_COUNT * 2; i++)
+    {
+        REQUIRE(seen[i]);
+    }
+
+    return true;
+}
+
+TEST_CASE(test_owned_initialize_parallel_speedup)
+{
+    ecs_free(ecs);
+    ecs = ecs_new(TEST_OWNED_INITIALIZE_SPEEDUP_CAPACITY, NULL);
+
+    owned_initialize_ctx_t ctx1 = { .count = TEST_OWNED_INITIALIZE_SPEEDUP_COUNT, .out = NULL };
+    owned_initialize_ctx_t ctx2 = { .count = TEST_OWNED_INITIALIZE_SPEEDUP_COUNT, .out = NULL };
+
+    sys1 = ecs_define_system(ecs, owned_initialize_system,
+                             &(ecs_sys_desc_t){ .owned_initialize = true, .udata = &ctx1 });
+    sys2 = ecs_define_system(ecs, owned_initialize_system,
+                             &(ecs_sys_desc_t){ .owned_initialize = true, .udata = &ctx2 });
+
+    struct timespec start, mid, end;
+
+    timespec_get(&start, TIME_UTC);
+    ecs_run_system(ecs, sys1, 0);
+    ecs_run_system(ecs, sys2, 0);
+    timespec_get(&mid, TIME_UTC);
+
+    test_thread_t t1, t2;
+
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t1, run_system_worker, &sys1));
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t2, run_system_worker, &sys2));
+
+    TEST_THREAD_JOIN(t1);
+    TEST_THREAD_JOIN(t2);
+    timespec_get(&end, TIME_UTC);
+
+    double serial_s   = test_elapsed_seconds(start, mid);
+    double parallel_s = test_elapsed_seconds(mid, end);
+
+    printf("owned_initialize timing: serial=%.4fs parallel=%.4fs (%.2fx)\n",
+           serial_s, parallel_s, parallel_s > 0.0 ? serial_s / parallel_s : 0.0);
+
+    return true;
+}
+
+TEST_CASE(test_owned_initialize_parallel_speedup_with_work)
+{
+    ecs_free(ecs);
+    ecs = ecs_new(TEST_OWNED_INITIALIZE_SPEEDUP_CAPACITY, NULL);
+
+    owned_initialize_ctx_t ctx1 = { .count = TEST_OWNED_INITIALIZE_WORK_COUNT,
+                                    .work_iterations = TEST_OWNED_INITIALIZE_WORK_ITERS,
+                                    .out = NULL };
+    owned_initialize_ctx_t ctx2 = { .count = TEST_OWNED_INITIALIZE_WORK_COUNT,
+                                    .work_iterations = TEST_OWNED_INITIALIZE_WORK_ITERS,
+                                    .out = NULL };
+
+    sys1 = ecs_define_system(ecs, owned_initialize_system,
+                             &(ecs_sys_desc_t){ .owned_initialize = true, .udata = &ctx1 });
+    sys2 = ecs_define_system(ecs, owned_initialize_system,
+                             &(ecs_sys_desc_t){ .owned_initialize = true, .udata = &ctx2 });
+
+    struct timespec start, mid, end;
+
+    timespec_get(&start, TIME_UTC);
+    ecs_run_system(ecs, sys1, 0);
+    ecs_run_system(ecs, sys2, 0);
+    timespec_get(&mid, TIME_UTC);
+
+    test_thread_t t1, t2;
+
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t1, run_system_worker, &sys1));
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t2, run_system_worker, &sys2));
+
+    TEST_THREAD_JOIN(t1);
+    TEST_THREAD_JOIN(t2);
+    timespec_get(&end, TIME_UTC);
+
+    double serial_s   = test_elapsed_seconds(start, mid);
+    double parallel_s = test_elapsed_seconds(mid, end);
+
+    printf("owned_initialize timing (with per-entity work): serial=%.4fs parallel=%.4fs (%.2fx)\n",
+           serial_s, parallel_s, parallel_s > 0.0 ? serial_s / parallel_s : 0.0);
+
+    return true;
+}
+
 TEST_SUITE(suite_threads)
 {
     RUN_TEST_CASE(test_concurrent_create_and_add);
@@ -408,4 +582,7 @@ TEST_SUITE(suite_threads)
     RUN_TEST_CASE(test_owned_update_parallel_speedup);
     RUN_TEST_CASE(test_owned_update_parallel_speedup_with_interference);
     RUN_TEST_CASE(test_owned_update_concurrent_structural_change_race);
+    RUN_TEST_CASE(test_owned_initialize_parallel_correctness);
+    RUN_TEST_CASE(test_owned_initialize_parallel_speedup);
+    RUN_TEST_CASE(test_owned_initialize_parallel_speedup_with_work);
 }
