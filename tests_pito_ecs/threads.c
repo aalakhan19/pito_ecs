@@ -121,6 +121,12 @@ static int run_system_worker(void* arg)
 #define TEST_OWNED_UPDATE_ENTITIES   20000
 #define TEST_OWNED_UPDATE_WORK_ITERS 500
 
+#define TEST_INTERFERENCE_SPAWN_COUNT 4000
+
+#define TEST_RACE_INITIAL_ENTITIES 800
+#define TEST_RACE_SPAWN_ENTITIES   2000
+#define TEST_RACE_WORK_ITERS       5000
+
 typedef struct
 {
     ecs_comp_t comp;
@@ -294,10 +300,112 @@ TEST_CASE(test_owned_update_parallel_speedup)
     return true;
 }
 
+TEST_CASE(test_owned_update_parallel_speedup_with_interference)
+{
+    sys1 = ecs_define_system(ecs, owned_update_system, &(ecs_sys_desc_t){ .owned_update = true });
+    sys2 = ecs_define_system(ecs, owned_update_system, &(ecs_sys_desc_t){ .owned_update = true });
+
+    ecs_require(ecs, sys1, comp1);
+    ecs_require(ecs, sys2, comp2);
+
+    owned_update_ctx_t ctx1 = { .comp = comp1, .work_iterations = TEST_OWNED_UPDATE_WORK_ITERS };
+    owned_update_ctx_t ctx2 = { .comp = comp2, .work_iterations = TEST_OWNED_UPDATE_WORK_ITERS };
+    ecs_set_system_udata(ecs, sys1, &ctx1);
+    ecs_set_system_udata(ecs, sys2, &ctx2);
+
+    for (int i = 0; i < TEST_OWNED_UPDATE_ENTITIES; i++)
+    {
+        ecs_entity_t entity = ecs_create(ecs);
+        ecs_add(ecs, entity, comp1, NULL);
+        ecs_add(ecs, entity, comp2, NULL);
+    }
+
+    struct timespec start, mid;
+    test_thread_t t1, t2;
+
+    timespec_get(&start, TIME_UTC);
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t1, run_system_worker, &sys1));
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t2, run_system_worker, &sys2));
+    TEST_THREAD_JOIN(t1);
+    TEST_THREAD_JOIN(t2);
+    timespec_get(&mid, TIME_UTC);
+
+    double baseline_s = test_elapsed_seconds(start, mid);
+
+    // entities on an unrelated component at the same time.
+    ecs_system_t sys3 = ecs_define_system(ecs, noop_system, NULL);
+    ecs_require(ecs, sys3, comp3);
+
+    spawn_ctx_t spawn_ctx = { .comp = comp3, .count = TEST_INTERFERENCE_SPAWN_COUNT };
+
+    struct timespec istart, iend;
+    test_thread_t t3;
+
+    timespec_get(&istart, TIME_UTC);
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t1, run_system_worker, &sys1));
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t2, run_system_worker, &sys2));
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t3, spawn_worker, &spawn_ctx));
+    TEST_THREAD_JOIN(t1);
+    TEST_THREAD_JOIN(t2);
+    TEST_THREAD_JOIN(t3);
+    timespec_get(&iend, TIME_UTC);
+
+    double interfered_s = test_elapsed_seconds(istart, iend);
+
+    printf("owned_update timing with interference: baseline=%.4fs interfered=%.4fs (%.2fx slower)\n",
+           baseline_s, interfered_s, baseline_s > 0.0 ? interfered_s / baseline_s : 0.0);
+
+    REQUIRE(ecs_get_entity_count(ecs, sys1) == (size_t)TEST_OWNED_UPDATE_ENTITIES);
+    REQUIRE(ecs_get_entity_count(ecs, sys2) == (size_t)TEST_OWNED_UPDATE_ENTITIES);
+    REQUIRE(ecs_get_entity_count(ecs, sys3) == (size_t)TEST_INTERFERENCE_SPAWN_COUNT);
+
+    ecs_entity_t* entities = ecs_get_entity_array(ecs, sys1);
+
+    for (size_t i = 0; i < (size_t)TEST_OWNED_UPDATE_ENTITIES; i++)
+    {
+        REQUIRE(((comp_t*)ecs_get(ecs, entities[i], comp1))->used);
+        REQUIRE(((comp_t*)ecs_get(ecs, entities[i], comp2))->used);
+    }
+
+    return true;
+}
+
+TEST_CASE(test_owned_update_concurrent_structural_change_race)
+{
+    sys1 = ecs_define_system(ecs, owned_update_system, &(ecs_sys_desc_t){ .owned_update = true });
+    ecs_require(ecs, sys1, comp1);
+
+    owned_update_ctx_t ctx1 = { .comp = comp1, .work_iterations = TEST_RACE_WORK_ITERS };
+    ecs_set_system_udata(ecs, sys1, &ctx1);
+
+    for (int i = 0; i < TEST_RACE_INITIAL_ENTITIES; i++)
+    {
+        ecs_entity_t entity = ecs_create(ecs);
+        ecs_add(ecs, entity, comp1, NULL);
+    }
+
+    spawn_ctx_t spawn_ctx = { .comp = comp1, .count = TEST_RACE_SPAWN_ENTITIES };
+
+    test_thread_t t1, t2;
+
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t1, run_system_worker, &sys1));
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t2, spawn_worker, &spawn_ctx));
+
+    TEST_THREAD_JOIN(t1);
+    TEST_THREAD_JOIN(t2);
+
+    REQUIRE(ecs_get_entity_count(ecs, sys1) ==
+            (size_t)(TEST_RACE_INITIAL_ENTITIES + TEST_RACE_SPAWN_ENTITIES));
+
+    return true;
+}
+
 TEST_SUITE(suite_threads)
 {
     RUN_TEST_CASE(test_concurrent_create_and_add);
     RUN_TEST_CASE(test_concurrent_run_system);
     RUN_TEST_CASE(test_owned_update_parallel_correctness);
     RUN_TEST_CASE(test_owned_update_parallel_speedup);
+    RUN_TEST_CASE(test_owned_update_parallel_speedup_with_interference);
+    RUN_TEST_CASE(test_owned_update_concurrent_structural_change_race);
 }
