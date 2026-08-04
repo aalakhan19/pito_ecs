@@ -156,9 +156,10 @@
     Constants:
     --------
 
-    - PITO_ECS_MAX_COMPONENTS  (default: 32)
-    - PITO_ECS_MAX_SYSTEMS     (default: 16)
-    - PITO_ECS_COMP_BLOCK_SIZE (default: 64)
+    - PITO_ECS_MAX_COMPONENTS        (default: 32)
+    - PITO_ECS_MAX_SYSTEMS           (default: 16)
+    - PITO_ECS_COMP_BLOCK_SIZE       (default: 64)
+    - PITO_ECS_INITIALIZE_SHARD_SIZE (default: 1024)
 
     Must be defined before PITO_ECS_IMPLEMENTATION
 */
@@ -526,6 +527,27 @@ ecs_entity_t ecs_create(ecs_t* ecs);
  */
 ecs_entity_t ecs_create_owned(ecs_t* ecs);
 
+
+/**
+ * @brief Creates an entity, safe to call concurrently from an owned_initialize
+ * system
+ *
+ * @param ecs The ECS context
+ *
+ * @returns The new entity
+ */
+ecs_entity_t ecs_create_owned_sharded(ecs_t* ecs);
+
+/**
+ * @brief Creates an entity, safe to call concurrently from an owned_initialize
+ * system
+ *
+ * @param ecs The ECS context
+ *
+ * @returns The new entity
+ */
+ecs_entity_t ecs_create_owned_sharded_n(ecs_t* ecs, size_t shard_size);
+
 /**
  * @brief Returns true if the entity is currently active and has not been queued
  * for destruction
@@ -650,6 +672,10 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
 #define PITO_ECS_COMP_BLOCK_SIZE 64
 #endif
 
+#ifndef PITO_ECS_INITIALIZE_SHARD_SIZE
+#define PITO_ECS_INITIALIZE_SHARD_SIZE 1024
+#endif
+
 #ifdef NDEBUG
     #define PITO_ECS_ASSERT(expr) ((void)0)
 #else
@@ -682,15 +708,16 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
  *  Aliases>
  *============================================================================*/
 
-#define ECS_ASSERT           PITO_ECS_ASSERT
-#define ECS_MAX_COMPONENTS   PITO_ECS_MAX_COMPONENTS
-#define ECS_MAX_SYSTEMS      PITO_ECS_MAX_SYSTEMS
-#define ECS_COMP_BLOCK_SIZE  PITO_ECS_COMP_BLOCK_SIZE
-#define ECS_MALLOC           PITO_ECS_MALLOC
-#define ECS_REALLOC          PITO_ECS_REALLOC
-#define ECS_FREE             PITO_ECS_FREE
-#define ECS_MEMSET           PITO_ECS_MEMSET
-#define ECS_MEMCPY           PITO_ECS_MEMCPY
+#define ECS_ASSERT                 PITO_ECS_ASSERT
+#define ECS_MAX_COMPONENTS         PITO_ECS_MAX_COMPONENTS
+#define ECS_MAX_SYSTEMS            PITO_ECS_MAX_SYSTEMS
+#define ECS_COMP_BLOCK_SIZE        PITO_ECS_COMP_BLOCK_SIZE
+#define ECS_INITIALIZE_SHARD_SIZE  PITO_ECS_INITIALIZE_SHARD_SIZE
+#define ECS_MALLOC                 PITO_ECS_MALLOC
+#define ECS_REALLOC                PITO_ECS_REALLOC
+#define ECS_FREE                   PITO_ECS_FREE
+#define ECS_MEMSET                 PITO_ECS_MEMSET
+#define ECS_MEMCPY                 PITO_ECS_MEMCPY
 
 #include <pthread.h>
 
@@ -732,6 +759,12 @@ typedef atomic_size_t ecs_atomic_size_t;
 #define ECS_ATOMIC_STORE(a, v)     (atomic_store((a), (v)))
 #define ECS_ATOMIC_FETCH_ADD(a, v) (atomic_fetch_add((a), (v)))
 
+#endif
+
+#if defined(__cplusplus)
+    #define ECS_THREAD_LOCAL thread_local
+#else
+    #define ECS_THREAD_LOCAL _Thread_local
 #endif
 
 /*=============================================================================
@@ -858,6 +891,7 @@ struct ecs_s
     ecs_entity_data_t* entities;
     size_t             entity_capacity;
     ecs_atomic_size_t  next_entity_id;
+    size_t             generation;
     ecs_comp_data_t    comps[ECS_MAX_COMPONENTS];
     ecs_comp_blocks_t  comp_blocks[ECS_MAX_COMPONENTS];
     size_t             comp_count;
@@ -975,6 +1009,8 @@ static bool ecs_is_system_ready(ecs_t* ecs, ecs_id_t sys_id);
  * Public API implementation
  *============================================================================*/
 
+static size_t ecs_next_generation = 0;
+
 ecs_t* ecs_new(size_t entity_capacity, void* mem_ctx)
 {
     ECS_ASSERT(entity_capacity > 0);
@@ -990,6 +1026,7 @@ ecs_t* ecs_new(size_t entity_capacity, void* mem_ctx)
 
     ecs->entity_capacity = (entity_capacity > 0) ? entity_capacity : 32;
     ECS_ATOMIC_INIT(&ecs->next_entity_id, 0);
+    ecs->generation      = ecs_next_generation++;
     ecs->system_active   = false;
     ecs->mem_ctx         = mem_ctx;
 
@@ -1072,6 +1109,7 @@ void ecs_reset(ecs_t* ecs)
     ECS_MEMSET(ecs->entities, 0, ecs->entity_capacity * sizeof(ecs_entity_data_t));
 
     ECS_ATOMIC_STORE(&ecs->next_entity_id, 0);
+    ecs->generation = ecs_next_generation++;
 
     for (ecs_id_t sys_id = 0; sys_id < ecs->system_count; sys_id++)
     {
@@ -1378,6 +1416,7 @@ ecs_entity_t ecs_create(ecs_t* ecs)
     return ecs_make_entity(entity_id);
 }
 
+//TODO: entities array growing not implemented yet
 ecs_entity_t ecs_create_owned(ecs_t* ecs)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
@@ -1390,6 +1429,44 @@ ecs_entity_t ecs_create_owned(ecs_t* ecs)
     ecs->entities[entity_id].ready  = true;
 
     return ecs_make_entity(entity_id);
+}
+
+typedef struct
+{
+    size_t generation;
+    ecs_id_t next;
+    ecs_id_t end;
+} ecs_id_shard_t;
+
+//TODO: entities array growing not implemented yet
+ecs_entity_t ecs_create_owned_sharded_n(ecs_t* ecs, size_t shard_size)
+{
+    ECS_ASSERT(ecs_is_not_null(ecs));
+    ECS_ASSERT(shard_size > 0);
+
+    static ECS_THREAD_LOCAL ecs_id_shard_t shard = { (size_t)-1, 0, 0 };
+
+    if (shard.generation != ecs->generation || shard.next >= shard.end)
+    {
+        ecs_id_t base = (ecs_id_t)ECS_ATOMIC_FETCH_ADD(&ecs->next_entity_id, shard_size);
+        shard.generation = ecs->generation;
+        shard.next       = base;
+        shard.end        = base + (ecs_id_t)shard_size;
+    }
+
+    ecs_id_t entity_id = shard.next++;
+
+    ECS_ASSERT((size_t)entity_id < ecs->entity_capacity);
+
+    ecs->entities[entity_id].active = true;
+    ecs->entities[entity_id].ready  = true;
+
+    return ecs_make_entity(entity_id);
+}
+
+ecs_entity_t ecs_create_owned_sharded(ecs_t* ecs)
+{
+    return ecs_create_owned_sharded_n(ecs, ECS_INITIALIZE_SHARD_SIZE);
 }
 
 bool ecs_is_ready(ecs_t* ecs, ecs_entity_t entity)
