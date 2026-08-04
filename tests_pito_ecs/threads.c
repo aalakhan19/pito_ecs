@@ -12,32 +12,30 @@ typedef struct
 {
     int (*fn)(void*);
     void* arg;
-} test_trampoline_args_t;
+} test_wrapper_args_t;
 
-static void* test_trampoline(void* p)
+static void* test_wrapper(void* p)
 {
-    test_trampoline_args_t* args = (test_trampoline_args_t*)p;
+    test_wrapper_args_t* args = (test_wrapper_args_t*)p;
     args->fn(args->arg);
     free(args);
     return NULL;
 }
 
-// Small helper struct is heap-allocated per thread and freed by the
-// trampoline once the worker returns; this is a test harness, not the
-// library, so no further cleanup machinery is needed.
+
 static int test_thread_create(test_thread_t* t, int (*fn)(void*), void* arg)
 {
-    test_trampoline_args_t* targs = (test_trampoline_args_t*)malloc(sizeof(*targs));
+    test_wrapper_args_t* targs = (test_wrapper_args_t*)malloc(sizeof(*targs));
     targs->fn = fn;
     targs->arg = arg;
-    return pthread_create(t, NULL, test_trampoline, targs) == 0 ? 0 : -1;
+    return pthread_create(t, NULL, test_wrapper, targs) == 0 ? 0 : -1;
 }
 
 #define TEST_THREAD_CREATE(t, fn, arg) test_thread_create((t), (fn), (arg))
 #define TEST_THREAD_JOIN(t)            pthread_join((t), NULL)
 #define TEST_THREAD_OK                 0
 
-// --- Helpers (suite_threads) --------------------------------------------
+// Helpers (suite_threads) --------------------------------------------
 
 #define TEST_THREAD_COUNT     4
 #define TEST_ENTITIES_PER_RUN 1000
@@ -92,7 +90,7 @@ static int run_system_worker(void* arg)
     return 0;
 }
 
-// --- Helpers (owned_update parallelism) ---------------------------------
+// Helpers (owned_update parallelism) ---------------------------------
 
 #define TEST_OWNED_UPDATE_ENTITIES   20000
 #define TEST_OWNED_UPDATE_WORK_ITERS 500
@@ -137,7 +135,7 @@ static double test_elapsed_seconds(struct timespec start, struct timespec end)
            (double)(end.tv_nsec - start.tv_nsec) / 1e9;
 }
 
-// --- Helpers (owned_initialize parallelism) ------------------------------
+// Helpers (owned_initialize parallelism) ------------------------------
 
 #define TEST_OWNED_INITIALIZE_COUNT             1000
 #define TEST_OWNED_INITIALIZE_CAPACITY          4096
