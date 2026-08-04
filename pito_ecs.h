@@ -164,20 +164,8 @@
 */
 
 
-#if !defined(__cplusplus)
-    #if defined(__STDC_NO_THREADS__)
-        // ECS_HAS_C11_THREADS intentionally left undefined; pthread fallback.
-    #elif defined(__has_include)
-        #if __has_include(<threads.h>)
-            #define ECS_HAS_C11_THREADS 1
-        #endif
-    #elif !defined(__APPLE__)
-        #define ECS_HAS_C11_THREADS 1
-    #endif
-
-    #if !defined(ECS_HAS_C11_THREADS) && !defined(_POSIX_C_SOURCE)
-        #define _POSIX_C_SOURCE 200809L
-    #endif
+#if !defined(_POSIX_C_SOURCE)
+    #define _POSIX_C_SOURCE 200809L
 #endif
 
 #ifndef PITO_ECS_H
@@ -704,30 +692,6 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
 #define ECS_MEMSET           PITO_ECS_MEMSET
 #define ECS_MEMCPY           PITO_ECS_MEMCPY
 
-#if defined(__cplusplus)
-
-#include <mutex>
-
-typedef std::recursive_mutex* ecs_mtx_t;
-
-#define ECS_MTX_INIT(m)    (*(m) = new std::recursive_mutex())
-#define ECS_MTX_LOCK(m)    (*(m))->lock()
-#define ECS_MTX_UNLOCK(m)  (*(m))->unlock()
-#define ECS_MTX_DESTROY(m) delete *(m)
-
-#elif defined(ECS_HAS_C11_THREADS)
-
-#include <threads.h>
-
-typedef mtx_t ecs_mtx_t;
-
-#define ECS_MTX_INIT(m)    mtx_init((m), mtx_plain | mtx_recursive)
-#define ECS_MTX_LOCK(m)    mtx_lock(m)
-#define ECS_MTX_UNLOCK(m)  mtx_unlock(m)
-#define ECS_MTX_DESTROY(m) mtx_destroy(m)
-
-#else // Fallback for platforms without C11 <threads.h>
-
 #include <pthread.h>
 
 typedef pthread_mutex_t ecs_mtx_t;
@@ -745,8 +709,6 @@ static void ecs_mtx_init_recursive(pthread_mutex_t* m)
 #define ECS_MTX_LOCK(m)    pthread_mutex_lock(m)
 #define ECS_MTX_UNLOCK(m)  pthread_mutex_unlock(m)
 #define ECS_MTX_DESTROY(m) pthread_mutex_destroy(m)
-
-#endif
 
 #if defined(__cplusplus)
 

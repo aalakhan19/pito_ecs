@@ -4,28 +4,6 @@
 #include <stdlib.h>
 #include <time.h>
 
-#if defined(__STDC_NO_THREADS__)
-    // TEST_HAS_C11_THREADS intentionally left undefined; pthread fallback.
-#elif defined(__has_include)
-    #if __has_include(<threads.h>)
-        #define TEST_HAS_C11_THREADS 1
-    #endif
-#elif !defined(__APPLE__)
-    #define TEST_HAS_C11_THREADS 1
-#endif
-
-#if defined(TEST_HAS_C11_THREADS)
-
-#include <threads.h>
-
-typedef thrd_t test_thread_t;
-
-#define TEST_THREAD_CREATE(t, fn, arg) thrd_create((t), (fn), (arg))
-#define TEST_THREAD_JOIN(t)            thrd_join((t), NULL)
-#define TEST_THREAD_OK                 thrd_success
-
-#else // Fallback for platforms without C11 <threads.h>
-
 #include <pthread.h>
 
 typedef pthread_t test_thread_t;
@@ -58,8 +36,6 @@ static int test_thread_create(test_thread_t* t, int (*fn)(void*), void* arg)
 #define TEST_THREAD_CREATE(t, fn, arg) test_thread_create((t), (fn), (arg))
 #define TEST_THREAD_JOIN(t)            pthread_join((t), NULL)
 #define TEST_THREAD_OK                 0
-
-#endif
 
 // --- Helpers (suite_threads) --------------------------------------------
 
