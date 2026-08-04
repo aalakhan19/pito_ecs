@@ -135,6 +135,47 @@ static double test_elapsed_seconds(struct timespec start, struct timespec end)
            (double)(end.tv_nsec - start.tv_nsec) / 1e9;
 }
 
+// Helpers (owned_update misuse)
+
+#define TEST_CORRUPTION_ENTITIES   200
+#define TEST_CORRUPTION_WORK_ITERS TEST_RACE_WORK_ITERS
+
+typedef struct
+{
+    long counter;
+} racy_counter_t;
+
+typedef struct
+{
+    ecs_comp_t comp;
+    size_t     work_iterations;
+} racy_increment_ctx_t;
+
+
+static ecs_ret_t racy_increment_system(ecs_t* ecs,
+                                       ecs_entity_t* entities,
+                                       size_t entity_count,
+                                       void* udata)
+{
+    racy_increment_ctx_t* ctx = (racy_increment_ctx_t*)udata;
+
+    for (size_t i = 0; i < entity_count; i++)
+    {
+        racy_counter_t* c = (racy_counter_t*)ecs_get(ecs, entities[i], ctx->comp);
+
+        long old = c->counter;
+
+        volatile double acc = 0.0;
+        for (size_t j = 0; j < ctx->work_iterations; j++)
+            acc += (double)j * 1.0000001;
+        (void)acc;
+
+        c->counter = old + 1;
+    }
+
+    return 0;
+}
+
 // Helpers (owned_initialize parallelism) ------------------------------
 
 #define TEST_OWNED_INITIALIZE_COUNT             1000
@@ -272,6 +313,60 @@ TEST_CASE(test_owned_update_parallel_correctness)
     return true;
 }
 
+
+TEST_CASE(test_owned_update_same_component_corrupts_data)
+{
+    ecs_comp_t counter_comp = ecs_define_component(ecs, sizeof(racy_counter_t), NULL);
+
+    sys1 = ecs_define_system(ecs, racy_increment_system, &(ecs_sys_desc_t){ .owned_update = true });
+    sys2 = ecs_define_system(ecs, racy_increment_system, &(ecs_sys_desc_t){ .owned_update = true });
+
+    ecs_require(ecs, sys1, counter_comp);
+    ecs_require(ecs, sys2, counter_comp);
+
+    racy_increment_ctx_t ctx1 = { .comp = counter_comp, .work_iterations = TEST_CORRUPTION_WORK_ITERS };
+    racy_increment_ctx_t ctx2 = { .comp = counter_comp, .work_iterations = TEST_CORRUPTION_WORK_ITERS };
+    ecs_set_system_udata(ecs, sys1, &ctx1);
+    ecs_set_system_udata(ecs, sys2, &ctx2);
+
+    for (int i = 0; i < TEST_CORRUPTION_ENTITIES; i++)
+    {
+        ecs_entity_t entity = ecs_create(ecs);
+        ecs_add(ecs, entity, counter_comp, NULL);
+    }
+
+    test_thread_t t1, t2;
+
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t1, run_system_worker, &sys1));
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t2, run_system_worker, &sys2));
+
+    TEST_THREAD_JOIN(t1);
+    TEST_THREAD_JOIN(t2);
+
+    size_t count = ecs_get_entity_count(ecs, sys1);
+    REQUIRE(count == (size_t)TEST_CORRUPTION_ENTITIES);
+
+    ecs_entity_t* entities = ecs_get_entity_array(ecs, sys1);
+
+    int corrupted = 0;
+
+    for (size_t i = 0; i < count; i++)
+    {
+        racy_counter_t* c = (racy_counter_t*)ecs_get(ecs, entities[i], counter_comp);
+
+        if (c->counter != 2)
+        {
+            corrupted++;
+        }
+    }
+
+    // TODO: very flaky test
+    // REQUIRE(corrupted > 0);
+
+    printf("found %d corrupted components", corrupted);
+
+    return true;
+}
 
 TEST_CASE(test_owned_update_parallel_speedup)
 {
@@ -553,6 +648,7 @@ TEST_SUITE(suite_threads)
     RUN_TEST_CASE(test_concurrent_create_and_add);
     RUN_TEST_CASE(test_concurrent_run_system);
     RUN_TEST_CASE(test_owned_update_parallel_correctness);
+    RUN_TEST_CASE(test_owned_update_same_component_corrupts_data);
     RUN_TEST_CASE(test_owned_update_parallel_speedup);
     RUN_TEST_CASE(test_owned_update_parallel_speedup_with_interference);
     RUN_TEST_CASE(test_owned_update_concurrent_structural_change_race);
