@@ -586,6 +586,28 @@ bool ecs_has(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp);
 void ecs_add(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args);
 
 /**
+ * @brief Attaches a component to an entity, safe to call concurrently from an
+ * owned_initialize system
+ *
+ * @param ecs    The ECS context
+ * @param entity The entity, created by this thread via ecs_create_owned*
+ * @param comp   The component
+ * @param args   Optional arguments passed to the component constructor.
+ *
+ * @returns The component data
+ */
+void* ecs_add_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args);
+
+/**
+ * @brief Makes entities built by owned_initialize systems visible to systems
+ *
+ * @param ecs      The ECS context
+ * @param entities The entities to match against systems
+ * @param count    The number of entities
+ */
+void ecs_sync_owned(ecs_t* ecs, const ecs_entity_t* entities, size_t count);
+
+/**
  * @brief Gets a component instance associated with an entity
  *
  * @param ecs    The ECS context
@@ -1708,6 +1730,69 @@ void ecs_add(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args)
 
     // Add/remove entity to/from systems based on matching criteria
     ecs_sync_add_remove(ecs, entity.id, comp.id);
+
+    ECS_MTX_UNLOCK(&ecs->lock);
+}
+
+
+void* ecs_add_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args)
+{
+    ECS_ASSERT(ecs_is_not_null(ecs));
+    ECS_ASSERT(ecs_is_valid_id(entity.id));
+    ECS_ASSERT(ecs_is_valid_component_id(comp.id));
+    ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
+    ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
+
+    ecs_comp_blocks_t* comp_blocks = &ecs->comp_blocks[comp.id];
+
+    size_t block = (size_t)entity.id / ECS_COMP_BLOCK_SIZE;
+    size_t slot  = (size_t)entity.id % ECS_COMP_BLOCK_SIZE;
+
+    // TODO: need to grow comp_blocks
+    ECS_ASSERT(block < comp_blocks->block_count);
+
+    ecs_bitset_flip(&ecs->entities[entity.id].comp_bits, comp.id, true);
+
+    // skip ecs_get to avoid locks for owned entity
+    void* comp_ptr = (char*)comp_blocks->blocks[block] + (comp_blocks->comp_size * slot);
+
+    ecs_comp_data_t* comp_data = &ecs->comps[comp.id];
+
+    if (comp_data->default_value)
+        ECS_MEMCPY(comp_ptr, comp_data->default_value, comp_data->size);
+    else
+        ECS_MEMSET(comp_ptr, 0, comp_blocks->comp_size);
+
+
+    if (comp_data->on_add)
+        comp_data->on_add(ecs, entity, comp, args, comp_data->udata);
+
+    return comp_ptr;
+}
+
+void ecs_sync_owned(ecs_t* ecs, const ecs_entity_t* entities, size_t count)
+{
+    ECS_ASSERT(ecs_is_not_null(ecs));
+    ECS_ASSERT(0 == count || NULL != entities);
+
+    ECS_MTX_LOCK(&ecs->lock);
+
+    for (size_t i = 0; i < count; i++)
+    {
+        ecs_id_t entity_id = entities[i].id;
+
+        ECS_ASSERT(ecs_is_valid_id(entity_id));
+        ECS_ASSERT(ecs_is_entity_ready(ecs, entity_id));
+
+        ecs_bitset_t comp_bits = ecs->entities[entity_id].comp_bits;
+
+        for (ecs_id_t comp_id = 0; comp_id < ecs->comp_count; comp_id++)
+        {
+            if (ecs_bitset_test(&comp_bits, comp_id))
+                //TODO: maybe add shorter version of sync here
+                ecs_sync_add_remove(ecs, entity_id, comp_id);
+        }
+    }
 
     ECS_MTX_UNLOCK(&ecs->lock);
 }
