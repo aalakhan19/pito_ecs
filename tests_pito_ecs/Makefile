@@ -6,9 +6,10 @@ ifeq ($(UNAME_S),Darwin)
     CC = clang
 endif
 
-SRCS   = main.c entity.c systems.c deferred.c set.c threads.c
+SRCS   = main.c entity.c systems.c deferred.c set.c threads.c owned_update.c \
+         owned_init.c owned_attach.c
 
-DEPS   = ../pito_ecs.h common.h
+DEPS   = ../pito_ecs.h common.h threads.h
 OBJS   = $(SRCS:.c=.o)
 
 all: tests

@@ -64,6 +64,9 @@ TEST_SUITE(suite_deferred);
 TEST_SUITE(suite_set);
 TEST_SUITE(suite_validation);
 TEST_SUITE(suite_threads);
+TEST_SUITE(suite_owned_update);
+TEST_SUITE(suite_owned_init);
+TEST_SUITE(suite_owned_attach);
 
 int main (void)
 {
@@ -77,6 +80,9 @@ int main (void)
     RUN_TEST_SUITE(suite_set);
     RUN_TEST_SUITE(suite_validation);
     RUN_TEST_SUITE(suite_threads);
+    RUN_TEST_SUITE(suite_owned_update);
+    RUN_TEST_SUITE(suite_owned_init);
+    RUN_TEST_SUITE(suite_owned_attach);
     pu_print_stats();
     return pu_test_failed();
 }
