@@ -14,7 +14,7 @@ ecs_comp_t comp3;
 ecs_system_t sys1;
 ecs_system_t sys2;
 
-void setup()
+void setup(void)
 {
     ecs = ecs_new(MIN_ENTITIES, NULL);
     comp1 = ecs_define_component(ecs, sizeof(comp_t), NULL);
@@ -22,7 +22,7 @@ void setup()
     comp3 = ecs_define_component(ecs, sizeof(comp_t), NULL);
 }
 
-void teardown()
+void teardown(void)
 {
     ecs_free(ecs);
     ecs = NULL;
@@ -65,7 +65,7 @@ TEST_SUITE(suite_set);
 TEST_SUITE(suite_validation);
 TEST_SUITE(suite_threads);
 
-int main ()
+int main (void)
 {
     pu_display_colors(true);
     pu_setup(setup, teardown);
