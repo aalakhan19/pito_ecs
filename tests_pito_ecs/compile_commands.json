@@ -1,0 +1,164 @@
+[
+  {
+    "file": "main.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-c",
+      "-o",
+      "main.o",
+      "main.c",
+      "-std=c11",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-pthread"
+    ],
+    "directory": "/Users/aala/projects/uni/pito_ecs/tests_pito_ecs",
+    "output": "main.o"
+  },
+  {
+    "file": "entity.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-c",
+      "-o",
+      "entity.o",
+      "entity.c",
+      "-std=c11",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-pthread"
+    ],
+    "directory": "/Users/aala/projects/uni/pito_ecs/tests_pito_ecs",
+    "output": "entity.o"
+  },
+  {
+    "file": "systems.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-c",
+      "-o",
+      "systems.o",
+      "systems.c",
+      "-std=c11",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-pthread"
+    ],
+    "directory": "/Users/aala/projects/uni/pito_ecs/tests_pito_ecs",
+    "output": "systems.o"
+  },
+  {
+    "file": "deferred.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-c",
+      "-o",
+      "deferred.o",
+      "deferred.c",
+      "-std=c11",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-pthread"
+    ],
+    "directory": "/Users/aala/projects/uni/pito_ecs/tests_pito_ecs",
+    "output": "deferred.o"
+  },
+  {
+    "file": "set.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-c",
+      "-o",
+      "set.o",
+      "set.c",
+      "-std=c11",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-pthread"
+    ],
+    "directory": "/Users/aala/projects/uni/pito_ecs/tests_pito_ecs",
+    "output": "set.o"
+  },
+  {
+    "file": "threads.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-c",
+      "-o",
+      "threads.o",
+      "threads.c",
+      "-std=c11",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-pthread"
+    ],
+    "directory": "/Users/aala/projects/uni/pito_ecs/tests_pito_ecs",
+    "output": "threads.o"
+  },
+  {
+    "file": "owned_update.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-c",
+      "-o",
+      "owned_update.o",
+      "owned_update.c",
+      "-std=c11",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-pthread"
+    ],
+    "directory": "/Users/aala/projects/uni/pito_ecs/tests_pito_ecs",
+    "output": "owned_update.o"
+  },
+  {
+    "file": "owned_init.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-c",
+      "-o",
+      "owned_init.o",
+      "owned_init.c",
+      "-std=c11",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-pthread"
+    ],
+    "directory": "/Users/aala/projects/uni/pito_ecs/tests_pito_ecs",
+    "output": "owned_init.o"
+  },
+  {
+    "file": "owned_attach.c",
+    "arguments": [
+      "/usr/bin/clang",
+      "-c",
+      "-o",
+      "owned_attach.o",
+      "owned_attach.c",
+      "-std=c11",
+      "-g",
+      "-Wall",
+      "-Wextra",
+      "-Wpedantic",
+      "-pthread"
+    ],
+    "directory": "/Users/aala/projects/uni/pito_ecs/tests_pito_ecs",
+    "output": "owned_attach.o"
+  }
+]

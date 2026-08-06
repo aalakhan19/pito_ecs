@@ -1,0 +1,7 @@
+CompileFlags:
+  CompilationDatabase: tests_pito_ecs
+  Add: [-DPITO_ECS_IMPLEMENTATION]
+
+Diagnostics:
+  ClangTidy:
+    Remove: misc-definitions-in-headers
