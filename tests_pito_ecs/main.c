@@ -67,6 +67,7 @@ TEST_SUITE(suite_threads);
 TEST_SUITE(suite_owned_update);
 TEST_SUITE(suite_owned_init);
 TEST_SUITE(suite_owned_attach);
+TEST_SUITE(suite_owned_local);
 
 int main (void)
 {
@@ -83,6 +84,7 @@ int main (void)
     RUN_TEST_SUITE(suite_owned_update);
     RUN_TEST_SUITE(suite_owned_init);
     RUN_TEST_SUITE(suite_owned_attach);
+    RUN_TEST_SUITE(suite_owned_local);
     pu_print_stats();
     return pu_test_failed();
 }

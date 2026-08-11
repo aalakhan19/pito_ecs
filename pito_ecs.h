@@ -160,6 +160,7 @@
     - PITO_ECS_MAX_SYSTEMS           (default: 16)
     - PITO_ECS_COMP_BLOCK_SIZE       (default: 64)
     - PITO_ECS_INITIALIZE_SHARD_SIZE (default: 1024)
+    - PITO_ECS_MAX_OWNED_LOCALS      (default: 16)
 
     Must be defined before PITO_ECS_IMPLEMENTATION
 */
@@ -384,6 +385,9 @@ typedef void (*ecs_on_leave_fn)(ecs_t* ecs, ecs_entity_t entity, void* udata);
  * @param udata       User data passed to callbacks (can be NULL)
  * @param owned_update
  * @param owned_initialize
+ * @param reads_owned Reads thread local entities in seprate thread. Each thread
+ * creates an addition run of the system //TODO: Sideeffects?
+ * @param owned_publish_at_end true if all thread local entities should be visibale after the system is run, instead of every entity on creation
  */
 typedef struct
 {
@@ -393,6 +397,8 @@ typedef struct
     void* udata;
     bool owned_update;
     bool owned_initialize;
+    bool reads_owned;
+    bool owned_publish_at_end;
 } ecs_sys_desc_t;
 
 /**
@@ -608,6 +614,32 @@ void* ecs_add_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args
 void ecs_sync_owned(ecs_t* ecs, const ecs_entity_t* entities, size_t count);
 
 /**
+ * @brief Creates an entity and records it in this threads local store
+ *
+ * @param ecs The ECS context
+ *
+ * @returns The new entity
+ */
+ecs_entity_t ecs_create_owned_local(ecs_t* ecs);
+
+/**
+ * @brief Creates an entity and records it in this threads local store
+ *
+ * @param ecs        The ECS context
+ * @param shard_size The shard size
+ *
+ * @returns The new entity
+ */
+ecs_entity_t ecs_create_owned_local_n(ecs_t* ecs, size_t shard_size);
+
+/**
+ * @brief Moves local entities into the global container
+ *
+ * @param ecs The ECS context
+ */
+void ecs_flush_owned(ecs_t* ecs);
+
+/**
  * @brief Gets a component instance associated with an entity
  *
  * @param ecs    The ECS context
@@ -694,6 +726,10 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
 #define PITO_ECS_COMP_BLOCK_SIZE 64
 #endif
 
+#ifndef PITO_ECS_MAX_OWNED_LOCALS
+#define PITO_ECS_MAX_OWNED_LOCALS 16
+#endif
+
 #ifndef PITO_ECS_INITIALIZE_SHARD_SIZE
 #define PITO_ECS_INITIALIZE_SHARD_SIZE 1024
 #endif
@@ -735,6 +771,8 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
 #define ECS_MAX_SYSTEMS            PITO_ECS_MAX_SYSTEMS
 #define ECS_COMP_BLOCK_SIZE        PITO_ECS_COMP_BLOCK_SIZE
 #define ECS_INITIALIZE_SHARD_SIZE  PITO_ECS_INITIALIZE_SHARD_SIZE
+#define ECS_MAX_OWNED_LOCALS       PITO_ECS_MAX_OWNED_LOCALS
+
 #define ECS_MALLOC                 PITO_ECS_MALLOC
 #define ECS_REALLOC                PITO_ECS_REALLOC
 #define ECS_FREE                   PITO_ECS_FREE
@@ -770,6 +808,9 @@ typedef std::atomic<size_t>* ecs_atomic_size_t;
 #define ECS_ATOMIC_STORE(a, v)     ((*(a))->store((v)))
 #define ECS_ATOMIC_FETCH_ADD(a, v) ((*(a))->fetch_add((v)))
 
+#define ECS_ATOMIC_STORE_RELEASE(a, v) ((*(a))->store((v), std::memory_order_release))
+#define ECS_ATOMIC_LOAD_ACQUIRE(a)     ((*(a))->load(std::memory_order_acquire))
+
 #else
 
 #include <stdatomic.h>
@@ -780,6 +821,9 @@ typedef atomic_size_t ecs_atomic_size_t;
 #define ECS_ATOMIC_DESTROY(a)      ((void)0)
 #define ECS_ATOMIC_STORE(a, v)     (atomic_store((a), (v)))
 #define ECS_ATOMIC_FETCH_ADD(a, v) (atomic_fetch_add((a), (v)))
+
+#define ECS_ATOMIC_STORE_RELEASE(a, v) (atomic_store_explicit((a), (v), memory_order_release))
+#define ECS_ATOMIC_LOAD_ACQUIRE(a)     (atomic_load_explicit((a), memory_order_acquire))
 
 #endif
 
@@ -855,7 +899,19 @@ typedef struct
     ecs_bitset_t comp_bits;
     bool         active;
     bool         ready;
+    bool         pending; // sits in a local store, not yet flushed
 } ecs_entity_data_t;
+
+// Entities created by one thread via ecs_create_owned_local
+typedef struct
+{
+    ecs_atomic_size_t count;
+    size_t            size;
+    size_t            capacity;
+    ecs_entity_t*     entities;
+    ecs_bitset_t      comp_bits; // archetype, all entities must be the same for one thread
+    bool              comp_bits_set;
+} ecs_owned_local_t;
 
 typedef struct
 {
@@ -881,6 +937,8 @@ typedef struct
     void*            udata;
     bool             owned_update;
     bool             owned_initialize;
+    bool             reads_owned;
+    bool             owned_publish_at_end;
 } ecs_sys_data_t;
 
 typedef enum
@@ -921,6 +979,8 @@ struct ecs_s
     size_t             system_count;
     bool               system_active;
     ecs_cmd_array_t    cmd_queue;
+    ecs_owned_local_t* owned_locals[ECS_MAX_OWNED_LOCALS];
+    ecs_atomic_size_t  owned_local_count;
     ecs_arena_t        arena;
     void*              mem_ctx;
     ecs_mtx_t          lock;
@@ -998,6 +1058,22 @@ static void ecs_sync_add_remove(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id
 static void ecs_sync_destroy(ecs_t* ecs, ecs_id_t entity_id);
 
 /*=============================================================================
+ * Owned local functions
+ *============================================================================*/
+
+static ECS_THREAD_LOCAL ecs_owned_local_t* ecs_tl_local = NULL;
+static ECS_THREAD_LOCAL size_t ecs_tl_local_generation = (size_t)-1;
+
+static ECS_THREAD_LOCAL bool ecs_tl_publish_at_end = false;
+
+static ecs_owned_local_t* ecs_owned_local_get(ecs_t* ecs);
+static void ecs_owned_local_publish(ecs_t* ecs, ecs_owned_local_t* local);
+static void ecs_owned_local_publish_tail(ecs_t* ecs);
+static void ecs_owned_local_free_all(ecs_t* ecs);
+static bool ecs_owned_local_matches(ecs_sys_data_t* sys_data, ecs_bitset_t comp_bits);
+static ecs_ret_t ecs_run_owned_locals(ecs_t* ecs, ecs_sys_data_t* sys_data);
+
+/*=============================================================================
  * ID array functions
  *============================================================================*/
 static void   ecs_id_array_init(ecs_t* ecs, ecs_id_array_t* pool, size_t capacity);
@@ -1025,6 +1101,7 @@ static bool ecs_is_valid_capacity(size_t capacity, size_t elem_size);
 static bool ecs_is_entity_ready(ecs_t* ecs, ecs_id_t entity_id);
 static bool ecs_is_component_ready(ecs_t* ecs, ecs_id_t comp_id);
 static bool ecs_is_system_ready(ecs_t* ecs, ecs_id_t sys_id);
+static bool ecs_is_not_pending(ecs_t* ecs, ecs_id_t entity_id);
 #endif // NDEBUG
 
 /*=============================================================================
@@ -1048,6 +1125,7 @@ ecs_t* ecs_new(size_t entity_capacity, void* mem_ctx)
 
     ecs->entity_capacity = (entity_capacity > 0) ? entity_capacity : 32;
     ECS_ATOMIC_INIT(&ecs->next_entity_id, 0);
+    ECS_ATOMIC_INIT(&ecs->owned_local_count, 0);
     ecs->generation      = ecs_next_generation++;
     ecs->system_active   = false;
     ecs->mem_ctx         = mem_ctx;
@@ -1083,6 +1161,7 @@ void ecs_free(ecs_t* ecs)
 
     ecs_id_array_free(ecs, &ecs->entity_pool);
     ecs_cmd_array_free(ecs, &ecs->cmd_queue);
+    ecs_owned_local_free_all(ecs);
     ecs_arena_destroy(ecs, &ecs->arena);
 
     for (ecs_id_t comp_id = 0; comp_id < ecs->comp_count; comp_id++)
@@ -1110,6 +1189,7 @@ void ecs_free(ecs_t* ecs)
     ECS_FREE(ecs->entities, ecs->mem_ctx);
 
     ECS_ATOMIC_DESTROY(&ecs->next_entity_id);
+    ECS_ATOMIC_DESTROY(&ecs->owned_local_count);
 
     ECS_MTX_DESTROY(&ecs->lock);
     ECS_MTX_DESTROY(&ecs->entity_lock);
@@ -1129,6 +1209,8 @@ void ecs_reset(ecs_t* ecs)
     ecs->entity_pool.size = 0;
 
     ECS_MEMSET(ecs->entities, 0, ecs->entity_capacity * sizeof(ecs_entity_data_t));
+
+    ecs_owned_local_free_all(ecs);
 
     ECS_ATOMIC_STORE(&ecs->next_entity_id, 0);
     ecs->generation = ecs_next_generation++;
@@ -1213,6 +1295,8 @@ ecs_system_t ecs_define_system(ecs_t* ecs,
         sys_data->udata = desc->udata;
         sys_data->owned_update = desc->owned_update;
         sys_data->owned_initialize = desc->owned_initialize;
+        sys_data->reads_owned = desc->reads_owned;
+        sys_data->owned_publish_at_end = desc->owned_publish_at_end;
     }
 
     ecs->system_count++;
@@ -1376,6 +1460,7 @@ ecs_entity_t* ecs_get_entity_array(ecs_t* ecs, ecs_system_t sys)
     return dense;
 }
 
+//TODO: maybe add thread local here too?
 size_t ecs_get_entity_count(ecs_t* ecs, ecs_system_t sys)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
@@ -1491,6 +1576,77 @@ ecs_entity_t ecs_create_owned_sharded(ecs_t* ecs)
     return ecs_create_owned_sharded_n(ecs, ECS_INITIALIZE_SHARD_SIZE);
 }
 
+ecs_entity_t ecs_create_owned_local_n(ecs_t* ecs, size_t shard_size)
+{
+    ECS_ASSERT(ecs_is_not_null(ecs));
+
+    ecs_owned_local_t* local = ecs_owned_local_get(ecs);
+
+    // Publishes the previous entity
+    if (!ecs_tl_publish_at_end)
+        ecs_owned_local_publish(ecs, local);
+
+    ecs_entity_t entity = ecs_create_owned_sharded_n(ecs, shard_size);
+
+    //TODO: growing not implemented yet
+    ECS_ASSERT(local->size < local->capacity);
+
+    local->entities[local->size++] = entity;
+    ecs->entities[entity.id].pending = true;
+
+    return entity;
+}
+
+ecs_entity_t ecs_create_owned_local(ecs_t* ecs)
+{
+    return ecs_create_owned_local_n(ecs, ECS_INITIALIZE_SHARD_SIZE);
+}
+
+void ecs_flush_owned(ecs_t* ecs)
+{
+    ECS_ASSERT(ecs_is_not_null(ecs));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
+    size_t local_count = ECS_ATOMIC_LOAD_ACQUIRE(&ecs->owned_local_count);
+
+    for (size_t i = 0; i < local_count; i++)
+    {
+        ecs_owned_local_t* local = ecs->owned_locals[i];
+
+        size_t count = ECS_ATOMIC_LOAD_ACQUIRE(&local->count);
+
+        ECS_ASSERT(count == local->size);
+
+        if (0 == count)
+            continue;
+
+        for (ecs_id_t sys_id = 0; sys_id < ecs->system_count; sys_id++)
+        {
+            ecs_sys_data_t* sys_data = &ecs->systems[sys_id];
+
+            if (!ecs_owned_local_matches(sys_data, local->comp_bits))
+                continue;
+
+            for (size_t j = 0; j < count; j++)
+            {
+                if (ecs_sparse_set_add(ecs, &sys_data->entity_ids, local->entities[j].id) &&
+                    sys_data->on_join)
+                    sys_data->on_join(ecs, local->entities[j], sys_data->udata);
+            }
+        }
+
+        for (size_t j = 0; j < count; j++)
+            ecs->entities[local->entities[j].id].pending = false;
+
+        ECS_ATOMIC_STORE_RELEASE(&local->count, 0);
+        local->size = 0;
+        local->comp_bits_set = false;
+    }
+
+    ECS_MTX_UNLOCK(&ecs->lock);
+}
+
 bool ecs_is_ready(ecs_t* ecs, ecs_entity_t entity)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
@@ -1512,6 +1668,7 @@ void ecs_set(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* data)
 
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
     ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
+    ECS_ASSERT(ecs_is_not_pending(ecs, entity.id));
 
     if (!ecs_has(ecs, entity, comp))
     {
@@ -1550,6 +1707,7 @@ void ecs_destroy(ecs_t* ecs, ecs_entity_t entity)
     ECS_MTX_LOCK(&ecs->lock);
 
     ECS_ASSERT(ecs_is_active(ecs, entity.id));
+    ECS_ASSERT(ecs_is_not_pending(ecs, entity.id));
 
     if (!ecs_is_active(ecs, entity.id))
     {
@@ -1668,6 +1826,7 @@ void ecs_add(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args)
 
     ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
+    ECS_ASSERT(ecs_is_not_pending(ecs, entity.id));
 
     if (ecs_has(ecs, entity, comp))
     {
@@ -1807,6 +1966,7 @@ void ecs_remove(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
 
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
     ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
+    ECS_ASSERT(ecs_is_not_pending(ecs, entity.id));
 
     if (!ecs_has(ecs, entity, comp))
     {
@@ -1860,10 +2020,21 @@ ecs_ret_t ecs_run_system(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
         if (0 != sys_data->mask && !(sys_data->mask & mask))
             return 0;
 
-        return sys_data->system_cb(ecs,
-                                   sys_data->entity_ids.dense,
-                                   sys_data->entity_ids.size,
-                                   sys_data->udata);
+        if (sys_data->owned_initialize)
+            ecs_tl_publish_at_end = sys_data->owned_publish_at_end;
+
+        ecs_ret_t code = sys_data->system_cb(ecs,
+                                             sys_data->entity_ids.dense,
+                                             sys_data->entity_ids.size,
+                                             sys_data->udata);
+
+        if (sys_data->owned_initialize)
+            ecs_owned_local_publish_tail(ecs);
+
+        if (0 == code && sys_data->reads_owned)
+            code = ecs_run_owned_locals(ecs, sys_data);
+
+        return code;
     }
 
     ECS_MTX_LOCK(&ecs->lock);
@@ -1888,6 +2059,9 @@ ecs_ret_t ecs_run_system(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
                      sys_data->entity_ids.dense,
                      sys_data->entity_ids.size,
                      sys_data->udata);
+
+    if (0 == code && sys_data->reads_owned)
+        code = ecs_run_owned_locals(ecs, sys_data);
 
     ecs->system_active = false;
 
@@ -2537,6 +2711,130 @@ static void ecs_sync_add_remove(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id
     }
 }
 
+/*=============================================================================
+ * Owned local functions
+ *============================================================================*/
+
+static ecs_owned_local_t* ecs_owned_local_get(ecs_t* ecs)
+{
+    if (ecs_tl_local_generation == ecs->generation)
+        return ecs_tl_local;
+
+    ecs_owned_local_t* local = (ecs_owned_local_t*)ECS_MALLOC(sizeof(ecs_owned_local_t),
+                                                              ecs->mem_ctx);
+
+    ECS_MEMSET(local, 0, sizeof(ecs_owned_local_t));
+
+    ECS_ATOMIC_INIT(&local->count, 0);
+
+    //TODO: growing not implemented yet
+    local->capacity = ecs->entity_capacity;
+
+    ECS_ASSERT(ecs_is_valid_capacity(local->capacity, sizeof(ecs_entity_t)));
+    local->entities = (ecs_entity_t*)ECS_MALLOC(local->capacity * sizeof(ecs_entity_t),
+                                                ecs->mem_ctx);
+
+    ECS_MTX_LOCK(&ecs->lock);
+
+    size_t index = ECS_ATOMIC_LOAD_ACQUIRE(&ecs->owned_local_count);
+
+    ECS_ASSERT(index < ECS_MAX_OWNED_LOCALS);
+
+    ecs->owned_locals[index] = local;
+    ECS_ATOMIC_STORE_RELEASE(&ecs->owned_local_count, index + 1);
+
+    ECS_MTX_UNLOCK(&ecs->lock);
+
+    ecs_tl_local            = local;
+    ecs_tl_local_generation = ecs->generation;
+
+    return local;
+}
+
+static void ecs_owned_local_publish(ecs_t* ecs, ecs_owned_local_t* local)
+{
+    if (0 == local->size)
+        return;
+
+    ecs_bitset_t comp_bits = ecs->entities[local->entities[local->size - 1].id].comp_bits;
+
+    if (!local->comp_bits_set)
+    {
+        local->comp_bits = comp_bits;
+        local->comp_bits_set  = true;
+    }
+    else
+    {
+        ECS_ASSERT(ecs_bitset_equal(&local->comp_bits, &comp_bits));
+    }
+
+    ECS_ATOMIC_STORE_RELEASE(&local->count, local->size);
+}
+
+static void ecs_owned_local_publish_tail(ecs_t* ecs)
+{
+    if (NULL != ecs_tl_local && ecs_tl_local_generation == ecs->generation)
+        ecs_owned_local_publish(ecs, ecs_tl_local);
+}
+
+static void ecs_owned_local_free_all(ecs_t* ecs)
+{
+    size_t local_count = ECS_ATOMIC_LOAD_ACQUIRE(&ecs->owned_local_count);
+
+    for (size_t i = 0; i < local_count; i++)
+    {
+        ecs_owned_local_t* local = ecs->owned_locals[i];
+
+        ECS_ATOMIC_DESTROY(&local->count);
+        ECS_FREE(local->entities, ecs->mem_ctx);
+        ECS_FREE(local, ecs->mem_ctx);
+
+        ecs->owned_locals[i] = NULL;
+    }
+
+    ECS_ATOMIC_STORE(&ecs->owned_local_count, 0);
+}
+
+static bool ecs_owned_local_matches(ecs_sys_data_t* sys_data, ecs_bitset_t comp_bits)
+{
+    ecs_bitset_t referenced = ecs_bitset_or(&sys_data->require_bits, &sys_data->exclude_bits);
+    ecs_bitset_t overlap = ecs_bitset_and(&referenced, &comp_bits);
+
+    if (!ecs_bitset_true(&overlap))
+        return false;
+
+    return ecs_entity_system_test(sys_data->require_bits,
+                                  sys_data->exclude_bits,
+                                  comp_bits);
+}
+
+// Runs the system over the published part of every local store it matches
+// TODO: Maybe sideeffect for running system multiple times for diffrent set of entites
+static ecs_ret_t ecs_run_owned_locals(ecs_t* ecs, ecs_sys_data_t* sys_data)
+{
+    size_t local_count = ECS_ATOMIC_LOAD_ACQUIRE(&ecs->owned_local_count);
+
+    for (size_t i = 0; i < local_count; i++)
+    {
+        ecs_owned_local_t* local = ecs->owned_locals[i];
+
+        size_t count = ECS_ATOMIC_LOAD_ACQUIRE(&local->count);
+
+        if (0 == count)
+            continue;
+
+        if (!ecs_owned_local_matches(sys_data, local->comp_bits))
+            continue;
+
+        ecs_ret_t code = sys_data->system_cb(ecs, local->entities, count, sys_data->udata);
+
+        if (0 != code)
+            return code;
+    }
+
+    return 0;
+}
+
 static void ecs_sync_destroy(ecs_t* ecs, ecs_id_t entity_id)
 {
     // Remove entity from systems
@@ -2747,6 +3045,11 @@ static bool ecs_is_component_ready(ecs_t* ecs, ecs_id_t comp_id)
 static bool ecs_is_system_ready(ecs_t* ecs, ecs_id_t sys_id)
 {
     return sys_id < ecs->system_count;
+}
+
+static bool ecs_is_not_pending(ecs_t* ecs, ecs_id_t entity_id)
+{
+    return !ecs->entities[entity_id].pending;
 }
 
 #endif // NDEBUG
