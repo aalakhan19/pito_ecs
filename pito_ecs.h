@@ -1715,9 +1715,9 @@ void ecs_destroy(ecs_t* ecs, ecs_entity_t entity)
         return;
     }
 
+    ECS_MTX_LOCK(&ecs->entity_lock);
     ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
 
-    ECS_MTX_LOCK(&ecs->entity_lock);
     ecs_bitset_t comp_bits = entity_data->comp_bits;
     ECS_MTX_UNLOCK(&ecs->entity_lock);
 
