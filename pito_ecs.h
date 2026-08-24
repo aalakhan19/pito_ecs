@@ -385,6 +385,7 @@ typedef void (*ecs_on_leave_fn)(ecs_t* ecs, ecs_entity_t entity, void* udata);
  * @param udata       User data passed to callbacks (can be NULL)
  * @param owned_update
  * @param owned_initialize
+ * @param owned_delete
  * @param reads_owned Reads thread local entities in seprate thread. Each thread
  * creates an addition run of the system //TODO: Sideeffects?
  * @param owned_publish_at_end true if all thread local entities should be visibale after the system is run, instead of every entity on creation
@@ -397,6 +398,7 @@ typedef struct
     void* udata;
     bool owned_update;
     bool owned_initialize;
+    bool owned_delete;
     bool reads_owned;
     bool owned_publish_at_end;
 } ecs_sys_desc_t;
@@ -612,6 +614,22 @@ void* ecs_add_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args
  * @param count    The number of entities
  */
 void ecs_sync_owned(ecs_t* ecs, const ecs_entity_t* entities, size_t count);
+
+/**
+ * @brief Removes a component from an entity
+ *
+ * @param ecs    The ECS context
+ * @param entity The entity
+ * @param comp   The component
+ */
+void ecs_remove_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp);
+
+/**
+ * @brief Cleans up deleted entities from sparse sets. resolves pending_adds
+ *
+ * @param ecs The ECS context
+ */
+void ecs_sync_owned_delete(ecs_t* ecs);
 
 /**
  * @brief Creates an entity and records it in this threads local store
@@ -937,6 +955,7 @@ typedef struct
     void*            udata;
     bool             owned_update;
     bool             owned_initialize;
+    bool             owned_delete;
     bool             reads_owned;
     bool             owned_publish_at_end;
 } ecs_sys_data_t;
@@ -965,6 +984,13 @@ typedef struct
     size_t     capacity;
 } ecs_cmd_array_t;
 
+// Needed for a system which new includes a entity after a owned_delete
+typedef struct
+{
+    ecs_entity_t entity;
+    ecs_system_t sys;
+} ecs_pending_add_t;
+
 struct ecs_s
 {
     ecs_id_array_t     entity_pool;
@@ -981,6 +1007,9 @@ struct ecs_s
     ecs_cmd_array_t    cmd_queue;
     ecs_owned_local_t* owned_locals[ECS_MAX_OWNED_LOCALS];
     ecs_atomic_size_t  owned_local_count;
+    ecs_pending_add_t* pending_adds;
+    size_t             pending_capacity;
+    ecs_atomic_size_t  pending_count;
     ecs_arena_t        arena;
     void*              mem_ctx;
     ecs_mtx_t          lock;
@@ -1045,6 +1074,8 @@ static void ecs_sparse_set_free(ecs_t* ecs, ecs_sparse_set_t* set);
 static bool ecs_sparse_set_add(ecs_t* ecs, ecs_sparse_set_t* set, ecs_id_t id);
 static inline bool ecs_sparse_set_find(ecs_sparse_set_t* set, ecs_id_t id, size_t* found);
 static inline bool ecs_sparse_set_remove(ecs_sparse_set_t* set, ecs_id_t id);
+static void ecs_sparse_set_deleted(ecs_sparse_set_t* set, ecs_id_t id);
+static void ecs_sparse_set_remove_deleted(ecs_sparse_set_t* set);
 
 /*=============================================================================
  * System entity add/remove functions
@@ -1126,6 +1157,7 @@ ecs_t* ecs_new(size_t entity_capacity, void* mem_ctx)
     ecs->entity_capacity = (entity_capacity > 0) ? entity_capacity : 32;
     ECS_ATOMIC_INIT(&ecs->next_entity_id, 0);
     ECS_ATOMIC_INIT(&ecs->owned_local_count, 0);
+    ECS_ATOMIC_INIT(&ecs->pending_count, 0);
     ecs->generation      = ecs_next_generation++;
     ecs->system_active   = false;
     ecs->mem_ctx         = mem_ctx;
@@ -1149,6 +1181,11 @@ ecs_t* ecs_new(size_t entity_capacity, void* mem_ctx)
 
     // Zero entity array
     ECS_MEMSET(ecs->entities, 0, ecs->entity_capacity * sizeof(ecs_entity_data_t));
+
+    //TODO: growing not implemented yet
+    ecs->pending_capacity = ecs->entity_capacity;
+    ECS_ASSERT(ecs_is_valid_capacity(ecs->pending_capacity, sizeof(ecs_pending_add_t)));
+    ecs->pending_adds = (ecs_pending_add_t*)ECS_MALLOC(ecs->pending_capacity * sizeof(ecs_pending_add_t), ecs->mem_ctx);
 
     ecs_arena_init(ecs, &ecs->arena, 512);
 
@@ -1187,9 +1224,11 @@ void ecs_free(ecs_t* ecs)
     }
 
     ECS_FREE(ecs->entities, ecs->mem_ctx);
+    ECS_FREE(ecs->pending_adds, ecs->mem_ctx);
 
     ECS_ATOMIC_DESTROY(&ecs->next_entity_id);
     ECS_ATOMIC_DESTROY(&ecs->owned_local_count);
+    ECS_ATOMIC_DESTROY(&ecs->pending_count);
 
     ECS_MTX_DESTROY(&ecs->lock);
     ECS_MTX_DESTROY(&ecs->entity_lock);
@@ -1213,6 +1252,7 @@ void ecs_reset(ecs_t* ecs)
     ecs_owned_local_free_all(ecs);
 
     ECS_ATOMIC_STORE(&ecs->next_entity_id, 0);
+    ECS_ATOMIC_STORE(&ecs->pending_count, 0);
     ecs->generation = ecs_next_generation++;
 
     for (ecs_id_t sys_id = 0; sys_id < ecs->system_count; sys_id++)
@@ -1295,6 +1335,7 @@ ecs_system_t ecs_define_system(ecs_t* ecs,
         sys_data->udata = desc->udata;
         sys_data->owned_update = desc->owned_update;
         sys_data->owned_initialize = desc->owned_initialize;
+        sys_data->owned_delete = desc->owned_delete;
         sys_data->reads_owned = desc->reads_owned;
         sys_data->owned_publish_at_end = desc->owned_publish_at_end;
     }
@@ -1956,6 +1997,77 @@ void ecs_sync_owned(ecs_t* ecs, const ecs_entity_t* entities, size_t count)
     ECS_MTX_UNLOCK(&ecs->lock);
 }
 
+void ecs_remove_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
+{
+    ECS_ASSERT(ecs_is_not_null(ecs));
+    ECS_ASSERT(ecs_is_valid_id(entity.id));
+    ECS_ASSERT(ecs_is_valid_component_id(comp.id));
+    ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
+    ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
+
+    ECS_MTX_LOCK(&ecs->entity_lock);
+    ecs_bitset_flip(&ecs->entities[entity.id].comp_bits, comp.id, false);
+    ecs_bitset_t comp_bits = ecs->entities[entity.id].comp_bits;
+    ECS_MTX_UNLOCK(&ecs->entity_lock);
+
+    ecs_comp_data_t* comp_data = &ecs->comps[comp.id];
+
+    if (comp_data->on_remove)
+        comp_data->on_remove(ecs, entity, comp, comp_data->udata);
+
+    for (ecs_id_t sys_id = 0; sys_id < ecs->system_count; sys_id++)
+    {
+        ecs_sys_data_t* sys_data = &ecs->systems[sys_id];
+
+        if (!ecs_bitset_test(&sys_data->require_bits, comp.id) && !ecs_bitset_test(&sys_data->exclude_bits, comp.id))
+            continue;
+
+        if (ecs_entity_system_test(sys_data->require_bits,
+                                   sys_data->exclude_bits,
+                                   comp_bits))
+        {
+            size_t index = ECS_ATOMIC_FETCH_ADD(&ecs->pending_count, 1);
+
+            ECS_ASSERT(index < ecs->pending_capacity);
+
+            ecs->pending_adds[index].entity = entity;
+            ecs->pending_adds[index].sys    = ecs_make_system(sys_id);
+        }
+        else if (ecs_sparse_set_find(&sys_data->entity_ids, entity.id, NULL))
+        {
+            ecs_sparse_set_deleted(&sys_data->entity_ids, entity.id);
+
+            if (sys_data->on_leave)
+                sys_data->on_leave(ecs, entity, sys_data->udata);
+        }
+    }
+}
+
+void ecs_sync_owned_delete(ecs_t* ecs)
+{
+    ECS_ASSERT(ecs_is_not_null(ecs));
+
+    ECS_MTX_LOCK(&ecs->lock);
+
+    for (ecs_id_t sys_id = 0; sys_id < ecs->system_count; sys_id++)
+        ecs_sparse_set_remove_deleted(&ecs->systems[sys_id].entity_ids);
+
+    size_t count = ECS_ATOMIC_LOAD_ACQUIRE(&ecs->pending_count);
+
+    for (size_t i = 0; i < count; i++)
+    {
+        ecs_entity_t entity   = ecs->pending_adds[i].entity;
+        ecs_sys_data_t* sys_data = &ecs->systems[ecs->pending_adds[i].sys.id];
+
+        if (ecs_sparse_set_add(ecs, &sys_data->entity_ids, entity.id) && sys_data->on_join)
+            sys_data->on_join(ecs, entity, sys_data->udata);
+    }
+
+    ECS_ATOMIC_STORE_RELEASE(&ecs->pending_count, 0);
+
+    ECS_MTX_UNLOCK(&ecs->lock);
+}
+
 void ecs_remove(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
@@ -2010,7 +2122,7 @@ ecs_ret_t ecs_run_system(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
 
     ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
 
-    if (sys_data->owned_update || sys_data->owned_initialize)
+    if (sys_data->owned_update || sys_data->owned_initialize || sys_data->owned_delete)
     {
         ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
@@ -2629,6 +2741,40 @@ static inline bool ecs_sparse_set_remove(ecs_sparse_set_t* set, ecs_id_t id)
     set->size--;
 
     return true;
+}
+
+static void ecs_sparse_set_deleted(ecs_sparse_set_t* set, ecs_id_t id)
+{
+    ECS_ASSERT(ecs_is_not_null(set));
+    ECS_ASSERT(ecs_is_valid_id(id));
+
+    size_t slot;
+
+    if (!ecs_sparse_set_find(set, id, &slot))
+        return;
+
+    set->dense[slot].id = ECS_INVALID_ID;
+}
+
+static void ecs_sparse_set_remove_deleted(ecs_sparse_set_t* set)
+{
+    ECS_ASSERT(ecs_is_not_null(set));
+
+    size_t size = 0;
+
+    for (size_t i = 0; i < set->size; i++)
+    {
+        ecs_id_t id = set->dense[i].id;
+
+        if (ECS_INVALID_ID == id)
+            continue;
+
+        set->dense[size].id = id;
+        set->sparse[id] = size;
+        size++;
+    }
+
+    set->size = size;
 }
 
 /*=============================================================================
