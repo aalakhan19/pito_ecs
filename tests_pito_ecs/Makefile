@@ -1,6 +1,10 @@
 CC     = gcc
 CFLAGS = -std=c11 -g -Wall -Wextra -Wpedantic -pthread
 
+ifeq ($(ATOMIC),1)
+    CFLAGS += -DPITO_ECS_OWNED_DELETE_ATOMIC=1
+endif
+
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
     CC = clang

@@ -752,6 +752,12 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
 #define PITO_ECS_INITIALIZE_SHARD_SIZE 1024
 #endif
 
+// 0: use entity lock
+// 1: dont use lock, but make comp bits atomic
+#ifndef PITO_ECS_OWNED_DELETE_ATOMIC
+#define PITO_ECS_OWNED_DELETE_ATOMIC 0
+#endif
+
 #ifdef NDEBUG
     #define PITO_ECS_ASSERT(expr) ((void)0)
 #else
@@ -790,6 +796,7 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
 #define ECS_COMP_BLOCK_SIZE        PITO_ECS_COMP_BLOCK_SIZE
 #define ECS_INITIALIZE_SHARD_SIZE  PITO_ECS_INITIALIZE_SHARD_SIZE
 #define ECS_MAX_OWNED_LOCALS       PITO_ECS_MAX_OWNED_LOCALS
+#define ECS_OWNED_DELETE_ATOMIC    PITO_ECS_OWNED_DELETE_ATOMIC
 
 #define ECS_MALLOC                 PITO_ECS_MALLOC
 #define ECS_REALLOC                PITO_ECS_REALLOC
@@ -843,6 +850,13 @@ typedef atomic_size_t ecs_atomic_size_t;
 #define ECS_ATOMIC_STORE_RELEASE(a, v) (atomic_store_explicit((a), (v), memory_order_release))
 #define ECS_ATOMIC_LOAD_ACQUIRE(a)     (atomic_load_explicit((a), memory_order_acquire))
 
+#endif
+
+#if ECS_OWNED_DELETE_ATOMIC
+#define ECS_ATOMIC_BITS_LOAD(p)         __atomic_load_n((p), __ATOMIC_ACQUIRE)
+#define ECS_ATOMIC_BITS_STORE(p, v)     __atomic_store_n((p), (v), __ATOMIC_RELEASE)
+#define ECS_ATOMIC_BITS_FETCH_OR(p, v)  __atomic_fetch_or((p), (v), __ATOMIC_ACQ_REL)
+#define ECS_ATOMIC_BITS_FETCH_AND(p, v) __atomic_fetch_and((p), (v), __ATOMIC_ACQ_REL)
 #endif
 
 #if defined(__cplusplus)
@@ -1053,6 +1067,11 @@ static inline ecs_bitset_t ecs_bitset_or(ecs_bitset_t* set1, ecs_bitset_t* set2)
 static inline ecs_bitset_t ecs_bitset_not(ecs_bitset_t* set);
 static inline bool ecs_bitset_equal(ecs_bitset_t* set1, ecs_bitset_t* set2);
 static inline bool ecs_bitset_true(ecs_bitset_t* set);
+
+static inline ecs_bitset_t ecs_comp_bits_load(ecs_t* ecs, ecs_id_t entity_id);
+static inline void ecs_comp_bits_reset(ecs_t* ecs, ecs_id_t entity_id);
+static inline ecs_bitset_t ecs_comp_bits_set(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id);
+static inline ecs_bitset_t ecs_comp_bits_clear(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id);
 
 /*=============================================================================
  * Arena functions
@@ -1756,11 +1775,7 @@ void ecs_destroy(ecs_t* ecs, ecs_entity_t entity)
         return;
     }
 
-    ECS_MTX_LOCK(&ecs->entity_lock);
-    ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
-
-    ecs_bitset_t comp_bits = entity_data->comp_bits;
-    ECS_MTX_UNLOCK(&ecs->entity_lock);
+    ecs_bitset_t comp_bits = ecs_comp_bits_load(ecs, entity.id);
 
     if (ecs->system_active)
     {
@@ -1768,7 +1783,7 @@ void ecs_destroy(ecs_t* ecs, ecs_entity_t entity)
         cmd->type   = ECS_CMD_DESTROY;
         cmd->entity = entity;
         ECS_MTX_LOCK(&ecs->entity_lock);
-        entity_data->ready = false;
+        ecs->entities[entity.id].ready = false;
         ECS_MTX_UNLOCK(&ecs->entity_lock);
         ECS_MTX_UNLOCK(&ecs->lock);
         return;
@@ -1793,10 +1808,11 @@ void ecs_destroy(ecs_t* ecs, ecs_entity_t entity)
     ecs_id_array_t* pool = &ecs->entity_pool;
     ecs_id_array_push(ecs, pool, entity.id);
 
+    ecs_comp_bits_reset(ecs, entity.id);
+
     ECS_MTX_LOCK(&ecs->entity_lock);
-    ECS_MEMSET(&entity_data->comp_bits, 0, sizeof(ecs_bitset_t));
-    entity_data->active = false;
-    entity_data->ready  = false;
+    ecs->entities[entity.id].active = false;
+    ecs->entities[entity.id].ready  = false;
     ECS_MTX_UNLOCK(&ecs->entity_lock);
 
     ECS_MTX_UNLOCK(&ecs->lock);
@@ -1808,27 +1824,16 @@ bool ecs_has(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
     ECS_ASSERT(ecs_is_valid_id(entity.id));
     ECS_ASSERT(ecs_is_valid_component_id(comp.id));
 
-    
     ECS_MTX_LOCK(&ecs->entity_lock);
-
-    // Load entity data
-    ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
-
-    bool result;
-
-    if (!entity_data->ready)
-    {
-        result = false;
-    }
-    else
-    {
-        // The component belongs to the entity if the corresponding bit is set
-        result = ecs_bitset_test(&entity_data->comp_bits, comp.id);
-    }
-
+    bool ready = ecs->entities[entity.id].ready;
     ECS_MTX_UNLOCK(&ecs->entity_lock);
 
-    return result;
+    if (!ready)
+        return false;
+
+    // The component belongs to the entity if the corresponding bit is set
+    ecs_bitset_t comp_bits = ecs_comp_bits_load(ecs, entity.id);
+    return ecs_bitset_test(&comp_bits, comp.id);
 }
 
 void* ecs_get(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
@@ -1875,10 +1880,7 @@ void ecs_add(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args)
         return;
     }
 
-    ECS_MTX_LOCK(&ecs->entity_lock);
-    ecs_entity_data_t* entity_data = &ecs->entities[entity.id];
-    ecs_bitset_flip(&entity_data->comp_bits, comp.id, true);
-    ECS_MTX_UNLOCK(&ecs->entity_lock);
+    ecs_comp_bits_set(ecs, entity.id, comp.id);
 
     // Load component
     ecs_comp_blocks_t* comp_blocks = &ecs->comp_blocks[comp.id];
@@ -1984,7 +1986,7 @@ void ecs_sync_owned(ecs_t* ecs, const ecs_entity_t* entities, size_t count)
         ECS_ASSERT(ecs_is_valid_id(entity_id));
         ECS_ASSERT(ecs_is_entity_ready(ecs, entity_id));
 
-        ecs_bitset_t comp_bits = ecs->entities[entity_id].comp_bits;
+        ecs_bitset_t comp_bits = ecs_comp_bits_load(ecs, entity_id);
 
         for (ecs_id_t comp_id = 0; comp_id < ecs->comp_count; comp_id++)
         {
@@ -2005,10 +2007,7 @@ void ecs_remove_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
     ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
 
-    ECS_MTX_LOCK(&ecs->entity_lock);
-    ecs_bitset_flip(&ecs->entities[entity.id].comp_bits, comp.id, false);
-    ecs_bitset_t comp_bits = ecs->entities[entity.id].comp_bits;
-    ECS_MTX_UNLOCK(&ecs->entity_lock);
+    ecs_bitset_t comp_bits = ecs_comp_bits_clear(ecs, entity.id, comp.id);
 
     ecs_comp_data_t* comp_data = &ecs->comps[comp.id];
 
@@ -2088,9 +2087,7 @@ void ecs_remove(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
 
     // Set entity component bit that determines which systems this entity
     // belongs to.
-    ECS_MTX_LOCK(&ecs->entity_lock);
-    ecs_bitset_flip(&ecs->entities[entity.id].comp_bits, comp.id, false);
-    ECS_MTX_UNLOCK(&ecs->entity_lock);
+    ecs_comp_bits_clear(ecs, entity.id, comp.id);
 
     if (ecs->system_active)
     {
@@ -2318,7 +2315,7 @@ static void ecs_cmd_flush_queue(ecs_t* ecs)
             case ECS_CMD_ADD:
                 if (ecs_is_ready(ecs, cmd->entity))
                 {
-                    ecs_bitset_flip(&ecs->entities[cmd->entity.id].comp_bits, cmd->comp.id, false);
+                    ecs_comp_bits_clear(ecs, cmd->entity.id, cmd->comp.id);
                     ecs_add(ecs, cmd->entity, cmd->comp, cmd->args);
                 }
                 break;
@@ -2326,7 +2323,7 @@ static void ecs_cmd_flush_queue(ecs_t* ecs)
             case ECS_CMD_REMOVE:
                 if (ecs_is_ready(ecs, cmd->entity))
                 {
-                    ecs_bitset_flip(&ecs->entities[cmd->entity.id].comp_bits, cmd->comp.id, true);
+                    ecs_comp_bits_set(ecs, cmd->entity.id, cmd->comp.id);
                     ecs_remove(ecs, cmd->entity, cmd->comp);
                 }
                 break;
@@ -2485,6 +2482,119 @@ static inline bool ecs_bitset_true(ecs_bitset_t* set)
 }
 
 #endif // ECS_MAX_COMPONENTS
+
+
+#if ECS_OWNED_DELETE_ATOMIC
+
+#if ECS_MAX_COMPONENTS <= 64
+
+static inline ecs_bitset_t ecs_comp_bits_load(ecs_t* ecs, ecs_id_t entity_id)
+{
+    return ECS_ATOMIC_BITS_LOAD(&ecs->entities[entity_id].comp_bits);
+}
+
+static inline void ecs_comp_bits_reset(ecs_t* ecs, ecs_id_t entity_id)
+{
+    ECS_ATOMIC_BITS_STORE(&ecs->entities[entity_id].comp_bits, 0);
+}
+
+static inline ecs_bitset_t ecs_comp_bits_set(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id)
+{
+    ecs_bitset_t* bits = &ecs->entities[entity_id].comp_bits;
+    ecs_bitset_t mask = (ecs_bitset_t)1 << comp_id;
+    return ECS_ATOMIC_BITS_FETCH_OR(bits, mask) | mask;
+}
+
+static inline ecs_bitset_t ecs_comp_bits_clear(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id)
+{
+    ecs_bitset_t* bits = &ecs->entities[entity_id].comp_bits;
+    ecs_bitset_t mask = (ecs_bitset_t)1 << comp_id;
+    return ECS_ATOMIC_BITS_FETCH_AND(bits, ~mask) & ~mask;
+}
+
+#else // ECS_MAX_COMPONENTS
+
+static inline ecs_bitset_t ecs_comp_bits_load(ecs_t* ecs, ecs_id_t entity_id)
+{
+    ecs_bitset_t* bits = &ecs->entities[entity_id].comp_bits;
+    ecs_bitset_t out;
+
+    for (int i = 0; i < ECS_BITSET_SIZE; i++)
+        out.array[i] = ECS_ATOMIC_BITS_LOAD(&bits->array[i]);
+
+    return out;
+}
+
+static inline void ecs_comp_bits_reset(ecs_t* ecs, ecs_id_t entity_id)
+{
+    ecs_bitset_t* bits = &ecs->entities[entity_id].comp_bits;
+
+    for (int i = 0; i < ECS_BITSET_SIZE; i++)
+        ECS_ATOMIC_BITS_STORE(&bits->array[i], 0);
+}
+
+static inline ecs_bitset_t ecs_comp_bits_set(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id)
+{
+    ecs_bitset_t* bits = &ecs->entities[entity_id].comp_bits;
+    uint64_t mask = (uint64_t)1 << (comp_id % ECS_BITSET_WIDTH);
+
+    ECS_ATOMIC_BITS_FETCH_OR(&bits->array[comp_id / ECS_BITSET_WIDTH], mask);
+
+    return ecs_comp_bits_load(ecs, entity_id);
+}
+
+static inline ecs_bitset_t ecs_comp_bits_clear(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id)
+{
+    ecs_bitset_t* bits = &ecs->entities[entity_id].comp_bits;
+    uint64_t mask = (uint64_t)1 << (comp_id % ECS_BITSET_WIDTH);
+
+    ECS_ATOMIC_BITS_FETCH_AND(&bits->array[comp_id / ECS_BITSET_WIDTH], ~mask);
+
+    return ecs_comp_bits_load(ecs, entity_id);
+}
+
+#endif // ECS_MAX_COMPONENTS
+
+#else // ECS_OWNED_DELETE_ATOMIC
+
+
+static inline ecs_bitset_t ecs_comp_bits_load(ecs_t* ecs, ecs_id_t entity_id)
+{
+    ECS_MTX_LOCK(&ecs->entity_lock);
+    ecs_bitset_t out = ecs->entities[entity_id].comp_bits;
+    ECS_MTX_UNLOCK(&ecs->entity_lock);
+
+    return out;
+}
+
+static inline void ecs_comp_bits_reset(ecs_t* ecs, ecs_id_t entity_id)
+{
+    ECS_MTX_LOCK(&ecs->entity_lock);
+    ECS_MEMSET(&ecs->entities[entity_id].comp_bits, 0, sizeof(ecs_bitset_t));
+    ECS_MTX_UNLOCK(&ecs->entity_lock);
+}
+
+static inline ecs_bitset_t ecs_comp_bits_set(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id)
+{
+    ECS_MTX_LOCK(&ecs->entity_lock);
+    ecs_bitset_flip(&ecs->entities[entity_id].comp_bits, comp_id, true);
+    ecs_bitset_t out = ecs->entities[entity_id].comp_bits;
+    ECS_MTX_UNLOCK(&ecs->entity_lock);
+
+    return out;
+}
+
+static inline ecs_bitset_t ecs_comp_bits_clear(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id)
+{
+    ECS_MTX_LOCK(&ecs->entity_lock);
+    ecs_bitset_flip(&ecs->entities[entity_id].comp_bits, comp_id, false);
+    ecs_bitset_t out = ecs->entities[entity_id].comp_bits;
+    ECS_MTX_UNLOCK(&ecs->entity_lock);
+
+    return out;
+}
+
+#endif // ECS_OWNED_DELETE_ATOMIC
 
 static ecs_arena_block_t* ecs_arena_block_create(ecs_t* ecs, size_t size)
 {
@@ -2818,8 +2928,7 @@ static inline bool ecs_entity_system_test(ecs_bitset_t require_bits,
 
 static void ecs_sync_add_remove(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id)
 {
-    // Load entity data
-    ecs_entity_data_t* entity_data = &ecs->entities[entity_id];
+    ecs_bitset_t comp_bits = ecs_comp_bits_load(ecs, entity_id);
 
     // Add or remove entity from systems
     for (ecs_id_t sys_id = 0; sys_id < ecs->system_count; sys_id++)
@@ -2835,7 +2944,7 @@ static void ecs_sync_add_remove(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id
         // Test to see if entity's components matches the system
         if (ecs_entity_system_test(sys_data->require_bits,
                                    sys_data->exclude_bits,
-                                   entity_data->comp_bits))
+                                   comp_bits))
         {
             // Add the entity directly to the sparse set
             if (ecs_sparse_set_add(ecs, &sys_data->entity_ids, entity_id))
