@@ -758,6 +758,11 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
 #define PITO_ECS_OWNED_DELETE_ATOMIC 0
 #endif
 
+// 0: off, 1: on
+#ifndef PITO_ECS_OWNED_DELETE_AUTO_FLUSH
+#define PITO_ECS_OWNED_DELETE_AUTO_FLUSH 0
+#endif
+
 #ifdef NDEBUG
     #define PITO_ECS_ASSERT(expr) ((void)0)
 #else
@@ -797,6 +802,7 @@ ecs_ret_t ecs_run_systems(ecs_t* ecs, ecs_mask_t mask);
 #define ECS_INITIALIZE_SHARD_SIZE  PITO_ECS_INITIALIZE_SHARD_SIZE
 #define ECS_MAX_OWNED_LOCALS       PITO_ECS_MAX_OWNED_LOCALS
 #define ECS_OWNED_DELETE_ATOMIC    PITO_ECS_OWNED_DELETE_ATOMIC
+#define ECS_OWNED_DELETE_AUTO_FLUSH PITO_ECS_OWNED_DELETE_AUTO_FLUSH
 
 #define ECS_MALLOC                 PITO_ECS_MALLOC
 #define ECS_REALLOC                PITO_ECS_REALLOC
@@ -1024,6 +1030,9 @@ struct ecs_s
     ecs_pending_add_t* pending_adds;
     size_t             pending_capacity;
     ecs_atomic_size_t  pending_count;
+#if ECS_OWNED_DELETE_AUTO_FLUSH
+    ecs_atomic_size_t  owned_delete_dirty;
+#endif
     ecs_arena_t        arena;
     void*              mem_ctx;
     ecs_mtx_t          lock;
@@ -1107,6 +1116,9 @@ static bool ecs_entity_system_test(ecs_bitset_t require_bits,
 static void ecs_sync_add_remove(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id);
 static void ecs_sync_destroy(ecs_t* ecs, ecs_id_t entity_id);
 
+static void ecs_sync_owned_delete_now(ecs_t* ecs);
+static void ecs_sync_owned_delete_auto(ecs_t* ecs);
+
 /*=============================================================================
  * Owned local functions
  *============================================================================*/
@@ -1177,6 +1189,9 @@ ecs_t* ecs_new(size_t entity_capacity, void* mem_ctx)
     ECS_ATOMIC_INIT(&ecs->next_entity_id, 0);
     ECS_ATOMIC_INIT(&ecs->owned_local_count, 0);
     ECS_ATOMIC_INIT(&ecs->pending_count, 0);
+#if ECS_OWNED_DELETE_AUTO_FLUSH
+    ECS_ATOMIC_INIT(&ecs->owned_delete_dirty, 0);
+#endif
     ecs->generation      = ecs_next_generation++;
     ecs->system_active   = false;
     ecs->mem_ctx         = mem_ctx;
@@ -1248,6 +1263,9 @@ void ecs_free(ecs_t* ecs)
     ECS_ATOMIC_DESTROY(&ecs->next_entity_id);
     ECS_ATOMIC_DESTROY(&ecs->owned_local_count);
     ECS_ATOMIC_DESTROY(&ecs->pending_count);
+#if ECS_OWNED_DELETE_AUTO_FLUSH
+    ECS_ATOMIC_DESTROY(&ecs->owned_delete_dirty);
+#endif
 
     ECS_MTX_DESTROY(&ecs->lock);
     ECS_MTX_DESTROY(&ecs->entity_lock);
@@ -1272,6 +1290,9 @@ void ecs_reset(ecs_t* ecs)
 
     ECS_ATOMIC_STORE(&ecs->next_entity_id, 0);
     ECS_ATOMIC_STORE(&ecs->pending_count, 0);
+#if ECS_OWNED_DELETE_AUTO_FLUSH
+    ECS_ATOMIC_STORE(&ecs->owned_delete_dirty, 0);
+#endif
     ecs->generation = ecs_next_generation++;
 
     for (ecs_id_t sys_id = 0; sys_id < ecs->system_count; sys_id++)
@@ -1513,6 +1534,8 @@ ecs_entity_t* ecs_get_entity_array(ecs_t* ecs, ecs_system_t sys)
 
     ECS_MTX_LOCK(&ecs->lock);
 
+    ecs_sync_owned_delete_auto(ecs);
+
     ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
     ecs_entity_t* dense = ecs->systems[sys.id].entity_ids.dense;
     ECS_MTX_UNLOCK(&ecs->lock);
@@ -1527,6 +1550,8 @@ size_t ecs_get_entity_count(ecs_t* ecs, ecs_system_t sys)
     ECS_ASSERT(ecs_is_valid_system_id(sys.id));
 
     ECS_MTX_LOCK(&ecs->lock);
+
+    ecs_sync_owned_delete_auto(ecs);
 
     ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
     size_t count = ecs->systems[sys.id].entity_ids.size;
@@ -1667,6 +1692,8 @@ void ecs_flush_owned(ecs_t* ecs)
     ECS_ASSERT(ecs_is_not_null(ecs));
 
     ECS_MTX_LOCK(&ecs->lock);
+
+    ecs_sync_owned_delete_auto(ecs);
 
     size_t local_count = ECS_ATOMIC_LOAD_ACQUIRE(&ecs->owned_local_count);
 
@@ -2042,16 +2069,13 @@ void ecs_remove_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
     }
 }
 
-void ecs_sync_owned_delete(ecs_t* ecs)
+static void ecs_sync_owned_delete_now(ecs_t* ecs)
 {
-    ECS_ASSERT(ecs_is_not_null(ecs));
-
-    ECS_MTX_LOCK(&ecs->lock);
-
     for (ecs_id_t sys_id = 0; sys_id < ecs->system_count; sys_id++)
         ecs_sparse_set_remove_deleted(&ecs->systems[sys_id].entity_ids);
 
     size_t count = ECS_ATOMIC_LOAD_ACQUIRE(&ecs->pending_count);
+    ECS_ATOMIC_STORE_RELEASE(&ecs->pending_count, 0);
 
     for (size_t i = 0; i < count; i++)
     {
@@ -2061,9 +2085,28 @@ void ecs_sync_owned_delete(ecs_t* ecs)
         if (ecs_sparse_set_add(ecs, &sys_data->entity_ids, entity.id) && sys_data->on_join)
             sys_data->on_join(ecs, entity, sys_data->udata);
     }
+}
 
-    ECS_ATOMIC_STORE_RELEASE(&ecs->pending_count, 0);
+static void ecs_sync_owned_delete_auto(ecs_t* ecs)
+{
+#if ECS_OWNED_DELETE_AUTO_FLUSH
+    if (0 == ECS_ATOMIC_LOAD_ACQUIRE(&ecs->owned_delete_dirty))
+        return;
 
+    ECS_ATOMIC_STORE_RELEASE(&ecs->owned_delete_dirty, 0);
+
+    ecs_sync_owned_delete_now(ecs);
+#else
+    (void)ecs;
+#endif
+}
+
+void ecs_sync_owned_delete(ecs_t* ecs)
+{
+    ECS_ASSERT(ecs_is_not_null(ecs));
+
+    ECS_MTX_LOCK(&ecs->lock);
+    ecs_sync_owned_delete_now(ecs);
     ECS_MTX_UNLOCK(&ecs->lock);
 }
 
@@ -2140,6 +2183,11 @@ ecs_ret_t ecs_run_system(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
         if (sys_data->owned_initialize)
             ecs_owned_local_publish_tail(ecs);
 
+#if ECS_OWNED_DELETE_AUTO_FLUSH
+        if (sys_data->owned_delete)
+            ECS_ATOMIC_STORE_RELEASE(&ecs->owned_delete_dirty, 1);
+#endif
+
         if (0 == code && sys_data->reads_owned)
             code = ecs_run_owned_locals(ecs, sys_data);
 
@@ -2147,6 +2195,8 @@ ecs_ret_t ecs_run_system(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
     }
 
     ECS_MTX_LOCK(&ecs->lock);
+
+    ecs_sync_owned_delete_auto(ecs);
 
     ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
@@ -2928,6 +2978,8 @@ static inline bool ecs_entity_system_test(ecs_bitset_t require_bits,
 
 static void ecs_sync_add_remove(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id)
 {
+    ecs_sync_owned_delete_auto(ecs);
+
     ecs_bitset_t comp_bits = ecs_comp_bits_load(ecs, entity_id);
 
     // Add or remove entity from systems
@@ -3092,6 +3144,8 @@ static ecs_ret_t ecs_run_owned_locals(ecs_t* ecs, ecs_sys_data_t* sys_data)
 
 static void ecs_sync_destroy(ecs_t* ecs, ecs_id_t entity_id)
 {
+    ecs_sync_owned_delete_auto(ecs);
+
     // Remove entity from systems
     for (ecs_id_t sys_id = 0; sys_id < ecs->system_count; sys_id++)
     {

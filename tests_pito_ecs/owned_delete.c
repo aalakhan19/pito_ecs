@@ -85,12 +85,17 @@ TEST_CASE(test_owned_delete_parallel_correctness)
     for (int i = 0; i < TEST_OWNED_DELETE_COUNT; i++)
         REQUIRE(!ecs_has(ecs, entities[i], comp1));
 
+#if !PITO_ECS_OWNED_DELETE_AUTO_FLUSH
     ecs_sync_owned_delete(ecs);
+#endif
 
     REQUIRE(0 == (int)ecs_get_entity_count(ecs, sys1));
 
     ecs_run_system(ecs, sys1, 0);
+
+#if !PITO_ECS_OWNED_DELETE_AUTO_FLUSH
     ecs_sync_owned_delete(ecs);
+#endif
 
     REQUIRE(0 == (int)ecs_get_entity_count(ecs, sys1));
 
@@ -131,7 +136,12 @@ TEST_CASE(test_owned_delete_join_is_deferred)
     ecs_run_system(ecs, sys1, 0);
 
     REQUIRE(!ecs_has(ecs, entities[0], comp2));
+
+#if PITO_ECS_OWNED_DELETE_AUTO_FLUSH
+    REQUIRE(TEST_OWNED_DELETE_COUNT == (int)ecs_get_entity_count(ecs, sys2));
+#else
     REQUIRE(TEST_OWNED_DELETE_COUNT / 2 == (int)ecs_get_entity_count(ecs, sys2));
+#endif
 
     ecs_sync_owned_delete(ecs);
 
