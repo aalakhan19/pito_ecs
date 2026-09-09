@@ -386,6 +386,7 @@ typedef void (*ecs_on_leave_fn)(ecs_t* ecs, ecs_entity_t entity, void* udata);
  * @param owned_update
  * @param owned_initialize
  * @param owned_delete
+ * @param owned_insert
  * @param reads_owned Reads thread local entities in seprate thread. Each thread
  * creates an addition run of the system //TODO: Sideeffects?
  * @param owned_publish_at_end true if all thread local entities should be visibale after the system is run, instead of every entity on creation
@@ -399,6 +400,7 @@ typedef struct
     bool owned_update;
     bool owned_initialize;
     bool owned_delete;
+    bool owned_insert;
     bool reads_owned;
     bool owned_publish_at_end;
 } ecs_sys_desc_t;
@@ -625,7 +627,19 @@ void ecs_sync_owned(ecs_t* ecs, const ecs_entity_t* entities, size_t count);
 void ecs_remove_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp);
 
 /**
- * @brief Cleans up deleted entities from sparse sets. resolves pending_adds
+ * @brief
+ *
+ * @param ecs    The ECS context
+ * @param entity The entity
+ * @param comp   The component
+ * @param args   Optional arguments passed to the component constructor
+ *
+ * @returns The component data
+ */
+void* ecs_insert_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args);
+
+/**
+ * @brief resolves pending_adds
  *
  * @param ecs The ECS context
  */
@@ -976,6 +990,7 @@ typedef struct
     bool             owned_update;
     bool             owned_initialize;
     bool             owned_delete;
+    bool             owned_insert;
     bool             reads_owned;
     bool             owned_publish_at_end;
 } ecs_sys_data_t;
@@ -1115,6 +1130,8 @@ static bool ecs_entity_system_test(ecs_bitset_t require_bits,
 
 static void ecs_sync_add_remove(ecs_t* ecs, ecs_id_t entity_id, ecs_id_t comp_id);
 static void ecs_sync_destroy(ecs_t* ecs, ecs_id_t entity_id);
+
+static void ecs_sync_owned_membership(ecs_t* ecs, ecs_entity_t entity, ecs_id_t comp_id, ecs_bitset_t comp_bits);
 
 static void ecs_sync_owned_delete_now(ecs_t* ecs);
 static void ecs_sync_owned_delete_auto(ecs_t* ecs);
@@ -1376,6 +1393,7 @@ ecs_system_t ecs_define_system(ecs_t* ecs,
         sys_data->owned_update = desc->owned_update;
         sys_data->owned_initialize = desc->owned_initialize;
         sys_data->owned_delete = desc->owned_delete;
+        sys_data->owned_insert = desc->owned_insert;
         sys_data->reads_owned = desc->reads_owned;
         sys_data->owned_publish_at_end = desc->owned_publish_at_end;
     }
@@ -2026,26 +2044,13 @@ void ecs_sync_owned(ecs_t* ecs, const ecs_entity_t* entities, size_t count)
     ECS_MTX_UNLOCK(&ecs->lock);
 }
 
-void ecs_remove_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
+static void ecs_sync_owned_membership(ecs_t* ecs, ecs_entity_t entity, ecs_id_t comp_id, ecs_bitset_t comp_bits)
 {
-    ECS_ASSERT(ecs_is_not_null(ecs));
-    ECS_ASSERT(ecs_is_valid_id(entity.id));
-    ECS_ASSERT(ecs_is_valid_component_id(comp.id));
-    ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
-    ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
-
-    ecs_bitset_t comp_bits = ecs_comp_bits_clear(ecs, entity.id, comp.id);
-
-    ecs_comp_data_t* comp_data = &ecs->comps[comp.id];
-
-    if (comp_data->on_remove)
-        comp_data->on_remove(ecs, entity, comp, comp_data->udata);
-
     for (ecs_id_t sys_id = 0; sys_id < ecs->system_count; sys_id++)
     {
         ecs_sys_data_t* sys_data = &ecs->systems[sys_id];
 
-        if (!ecs_bitset_test(&sys_data->require_bits, comp.id) && !ecs_bitset_test(&sys_data->exclude_bits, comp.id))
+        if (!ecs_bitset_test(&sys_data->require_bits, comp_id) && !ecs_bitset_test(&sys_data->exclude_bits, comp_id))
             continue;
 
         if (ecs_entity_system_test(sys_data->require_bits,
@@ -2067,6 +2072,57 @@ void ecs_remove_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
                 sys_data->on_leave(ecs, entity, sys_data->udata);
         }
     }
+}
+
+void ecs_remove_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
+{
+    ECS_ASSERT(ecs_is_not_null(ecs));
+    ECS_ASSERT(ecs_is_valid_id(entity.id));
+    ECS_ASSERT(ecs_is_valid_component_id(comp.id));
+    ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
+    ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
+
+    ecs_bitset_t comp_bits = ecs_comp_bits_clear(ecs, entity.id, comp.id);
+
+    ecs_comp_data_t* comp_data = &ecs->comps[comp.id];
+
+    if (comp_data->on_remove)
+        comp_data->on_remove(ecs, entity, comp, comp_data->udata);
+
+    ecs_sync_owned_membership(ecs, entity, comp.id, comp_bits);
+}
+
+void* ecs_insert_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args)
+{
+    ECS_ASSERT(ecs_is_not_null(ecs));
+    ECS_ASSERT(ecs_is_valid_id(entity.id));
+    ECS_ASSERT(ecs_is_valid_component_id(comp.id));
+    ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
+    ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
+
+    ecs_comp_blocks_t* comp_blocks = &ecs->comp_blocks[comp.id];
+
+    ECS_MTX_LOCK(&ecs->comp_lock[comp.id]);
+    ecs_comp_blocks_resize(ecs, comp_blocks, entity.id);
+    ECS_MTX_UNLOCK(&ecs->comp_lock[comp.id]);
+
+    ecs_bitset_t comp_bits = ecs_comp_bits_set(ecs, entity.id, comp.id);
+
+    void* comp_ptr = ecs_get(ecs, entity, comp);
+
+    ecs_comp_data_t* comp_data = &ecs->comps[comp.id];
+
+    if (comp_data->default_value)
+        ECS_MEMCPY(comp_ptr, comp_data->default_value, comp_data->size);
+    else
+        ECS_MEMSET(comp_ptr, 0, comp_blocks->comp_size);
+
+    if (comp_data->on_add)
+        comp_data->on_add(ecs, entity, comp, args, comp_data->udata);
+
+    ecs_sync_owned_membership(ecs, entity, comp.id, comp_bits);
+
+    return comp_ptr;
 }
 
 static void ecs_sync_owned_delete_now(ecs_t* ecs)
@@ -2162,7 +2218,7 @@ ecs_ret_t ecs_run_system(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
 
     ecs_sys_data_t* sys_data = &ecs->systems[sys.id];
 
-    if (sys_data->owned_update || sys_data->owned_initialize || sys_data->owned_delete)
+    if (sys_data->owned_update || sys_data->owned_initialize || sys_data->owned_delete ||sys_data->owned_insert)
     {
         ECS_ASSERT(ecs_is_system_ready(ecs, sys.id));
 
@@ -2184,7 +2240,7 @@ ecs_ret_t ecs_run_system(ecs_t* ecs, ecs_system_t sys, ecs_mask_t mask)
             ecs_owned_local_publish_tail(ecs);
 
 #if ECS_OWNED_DELETE_AUTO_FLUSH
-        if (sys_data->owned_delete)
+        if (sys_data->owned_delete || sys_data->owned_insert)
             ECS_ATOMIC_STORE_RELEASE(&ecs->owned_delete_dirty, 1);
 #endif
 

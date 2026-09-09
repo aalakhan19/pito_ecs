@@ -16,7 +16,7 @@ endif
 
 SRCS   = main.c entity.c systems.c deferred.c set.c threads.c owned_update.c \
          owned_init.c owned_attach.c owned_local.c \
-         owned_delete.c
+         owned_delete.c owned_insert.c
 
 DEPS   = ../pito_ecs.h common.h threads.h
 OBJS   = $(SRCS:.c=.o)
