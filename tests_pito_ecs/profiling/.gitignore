@@ -2,3 +2,5 @@
 !.gitignore
 !flamegraph.sh
 !owned_delete_fg.c
+!owned_insert_flamegraph.sh
+!owned_insert_fg.c
