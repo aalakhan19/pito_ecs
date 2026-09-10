@@ -1167,6 +1167,7 @@ static inline size_t ecs_id_array_size(ecs_id_array_t* pool);
 static void ecs_comp_blocks_init(ecs_t* ecs, ecs_comp_blocks_t* array, size_t size, size_t capacity);
 static void ecs_comp_blocks_free(ecs_t* ecs, ecs_comp_blocks_t* array);
 static void ecs_comp_blocks_resize(ecs_t* ecs, ecs_comp_blocks_t* array, ecs_id_t id);
+static inline void* ecs_get_raw(ecs_comp_blocks_t* comp_blocks, ecs_id_t entity_id);
 
 /*=============================================================================
  * Validation functions
@@ -1881,26 +1882,26 @@ bool ecs_has(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
     return ecs_bitset_test(&comp_bits, comp.id);
 }
 
+static inline void* ecs_get_raw(ecs_comp_blocks_t* comp_blocks, ecs_id_t entity_id)
+{
+    size_t block = (size_t)entity_id / ECS_COMP_BLOCK_SIZE;
+    size_t slot  = (size_t)entity_id % ECS_COMP_BLOCK_SIZE;
+
+    return (char*)comp_blocks->blocks[block] + (comp_blocks->comp_size * slot);
+}
+
 void* ecs_get(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp)
 {
     ECS_ASSERT(ecs_is_not_null(ecs));
     ECS_ASSERT(ecs_is_valid_id(entity.id));
     ECS_ASSERT(ecs_is_valid_component_id(comp.id));
 
-
     ECS_MTX_LOCK(&ecs->comp_lock[comp.id]);
 
     ECS_ASSERT(ecs_is_component_ready(ecs, comp.id));
     ECS_ASSERT(ecs_is_entity_ready(ecs, entity.id));
 
-    // Map entity ID to block and slot within that block.
-    // Blocks are never reallocated, so returned pointers remain stable.
-    ecs_comp_blocks_t* comp_blocks = &ecs->comp_blocks[comp.id];
-
-    size_t block = entity.id / ECS_COMP_BLOCK_SIZE;
-    size_t slot  = entity.id % ECS_COMP_BLOCK_SIZE;
-
-    void* ptr = (char*)comp_blocks->blocks[block] + (comp_blocks->comp_size * slot);
+    void* ptr = ecs_get_raw(&ecs->comp_blocks[comp.id], entity.id);
 
     ECS_MTX_UNLOCK(&ecs->comp_lock[comp.id]);
 
@@ -1992,16 +1993,12 @@ void* ecs_add_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* args
 
     ecs_comp_blocks_t* comp_blocks = &ecs->comp_blocks[comp.id];
 
-    size_t block = (size_t)entity.id / ECS_COMP_BLOCK_SIZE;
-    size_t slot  = (size_t)entity.id % ECS_COMP_BLOCK_SIZE;
-
     // TODO: need to grow comp_blocks
-    ECS_ASSERT(block < comp_blocks->block_count);
+    ECS_ASSERT((size_t)entity.id / ECS_COMP_BLOCK_SIZE < comp_blocks->block_count);
 
     ecs_bitset_flip(&ecs->entities[entity.id].comp_bits, comp.id, true);
 
-    // skip ecs_get to avoid locks for owned entity
-    void* comp_ptr = (char*)comp_blocks->blocks[block] + (comp_blocks->comp_size * slot);
+    void* comp_ptr = ecs_get_raw(comp_blocks, entity.id);
 
     ecs_comp_data_t* comp_data = &ecs->comps[comp.id];
 
@@ -2104,11 +2101,10 @@ void* ecs_insert_owned(ecs_t* ecs, ecs_entity_t entity, ecs_comp_t comp, void* a
 
     ECS_MTX_LOCK(&ecs->comp_lock[comp.id]);
     ecs_comp_blocks_resize(ecs, comp_blocks, entity.id);
+    void* comp_ptr = ecs_get_raw(comp_blocks, entity.id);
     ECS_MTX_UNLOCK(&ecs->comp_lock[comp.id]);
 
     ecs_bitset_t comp_bits = ecs_comp_bits_set(ecs, entity.id, comp.id);
-
-    void* comp_ptr = ecs_get(ecs, entity, comp);
 
     ecs_comp_data_t* comp_data = &ecs->comps[comp.id];
 
