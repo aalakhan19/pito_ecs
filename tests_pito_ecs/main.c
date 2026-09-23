@@ -70,6 +70,7 @@ TEST_SUITE(suite_owned_attach);
 TEST_SUITE(suite_owned_local);
 TEST_SUITE(suite_owned_delete);
 TEST_SUITE(suite_owned_insert);
+TEST_SUITE(suite_owned_mixed);
 
 int main (void)
 {
@@ -89,6 +90,7 @@ int main (void)
     RUN_TEST_SUITE(suite_owned_local);
     RUN_TEST_SUITE(suite_owned_delete);
     RUN_TEST_SUITE(suite_owned_insert);
+    RUN_TEST_SUITE(suite_owned_mixed);
     pu_print_stats();
     return pu_test_failed();
 }
