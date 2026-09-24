@@ -487,6 +487,70 @@ TEST_CASE(test_owned_initialize_attach_concurrent_with_locked_tier)
     return true;
 }
 
+#define TEST_GROWTH_RACE_CAPACITY 64
+#define TEST_GROWTH_RACE_TARGETS  32
+#define TEST_GROWTH_RACE_TOGGLES  20000
+#define TEST_GROWTH_RACE_SPAWN    20000
+
+typedef struct
+{
+    ecs_comp_t comp;
+    ecs_entity_t* targets;
+    int target_count;
+    int toggles;
+} growth_race_toggle_ctx_t;
+
+static int growth_race_toggle_worker(void* arg)
+{
+    growth_race_toggle_ctx_t* ctx = (growth_race_toggle_ctx_t*)arg;
+
+    for (int i = 0; i < ctx->toggles; i++)
+    {
+        ecs_entity_t entity = ctx->targets[i % ctx->target_count];
+        ecs_insert_owned(ecs, entity, ctx->comp, NULL);
+        ecs_remove_owned(ecs, entity, ctx->comp);
+    }
+
+    return 0;
+}
+
+TEST_CASE(test_entities_array_growth_races_owned_comp_bits)
+{
+    ecs_free(ecs);
+    ecs = ecs_new(TEST_GROWTH_RACE_CAPACITY, NULL);
+
+    ecs_comp_t base    = ecs_define_component(ecs, sizeof(comp_t), NULL);
+    ecs_comp_t toggled = ecs_define_component(ecs, sizeof(comp_t), NULL);
+
+    static ecs_entity_t targets[TEST_GROWTH_RACE_TARGETS];
+
+    for (int i = 0; i < TEST_GROWTH_RACE_TARGETS; i++)
+    {
+        targets[i] = ecs_create(ecs);
+        ecs_add(ecs, targets[i], base, NULL);
+    }
+
+    growth_race_toggle_ctx_t toggle_ctx = { .comp         = toggled,
+                                            .targets      = targets,
+                                            .target_count = TEST_GROWTH_RACE_TARGETS,
+                                            .toggles      = TEST_GROWTH_RACE_TOGGLES };
+
+    spawn_ctx_t spawn_ctx = { .comp = base, .count = TEST_GROWTH_RACE_SPAWN };
+
+    test_thread_t t1, t2;
+
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t1, growth_race_toggle_worker, &toggle_ctx));
+    REQUIRE(TEST_THREAD_OK == TEST_THREAD_CREATE(&t2, spawn_worker, &spawn_ctx));
+
+    TEST_THREAD_JOIN(t1);
+    TEST_THREAD_JOIN(t2);
+
+    for (int i = 0; i < TEST_GROWTH_RACE_TARGETS; i++)
+        REQUIRE(!ecs_has(ecs, targets[i], toggled));
+
+    return true;
+}
+
 TEST_SUITE(suite_owned_mixed)
 {
     RUN_TEST_CASE(test_owned_insert_concurrent_with_locked_tier);
@@ -494,4 +558,5 @@ TEST_SUITE(suite_owned_mixed)
     RUN_TEST_CASE(test_owned_insert_and_delete_concurrent_disjoint);
     RUN_TEST_CASE(test_owned_update_and_insert_concurrent_disjoint);
     RUN_TEST_CASE(test_owned_initialize_attach_concurrent_with_locked_tier);
+    RUN_TEST_CASE(test_entities_array_growth_races_owned_comp_bits);
 }

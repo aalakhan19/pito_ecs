@@ -1,3 +1,5 @@
 tests
+tests_tsan
+tests_tsan.dSYM/
 *.o
 *.exe

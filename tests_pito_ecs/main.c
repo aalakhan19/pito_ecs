@@ -28,6 +28,7 @@ void teardown(void)
     ecs = NULL;
 }
 
+#ifndef NDEBUG
 TEST_CASE(test_capacity_validation)
 {
     // capacity with the high bit set is not valid
@@ -50,10 +51,13 @@ TEST_CASE(test_capacity_validation)
 
     return true;
 }
+#endif
 
 TEST_SUITE(suite_validation)
 {
+#ifndef NDEBUG
     RUN_TEST_CASE(test_capacity_validation);
+#endif
 }
 
 TEST_SUITE(suite_entity);

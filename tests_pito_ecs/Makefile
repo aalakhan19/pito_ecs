@@ -9,6 +9,10 @@ ifeq ($(AUTO_FLUSH),1)
     CFLAGS += -DPITO_ECS_OWNED_DELETE_AUTO_FLUSH=1
 endif
 
+ifeq ($(NDEBUG),1)
+    CFLAGS += -DNDEBUG
+endif
+
 UNAME_S := $(shell uname -s)
 ifeq ($(UNAME_S),Darwin)
     CC = clang
@@ -29,7 +33,12 @@ all: tests
 tests: $(OBJS)
 	$(CC) -o tests $(OBJS) -lm -pthread
 
-.PHONY: clean
+TSAN_CC = $(shell brew --prefix llvm)/bin/clang
+
+tsan:
+	$(TSAN_CC) $(CFLAGS) -O1 -fsanitize=thread -DPITO_ECS_TSAN=1 -o tests_tsan $(SRCS) -lm
+
+.PHONY: clean tsan
 
 clean:
-	rm -f tests *.o
+	rm -f tests tests_tsan *.o
