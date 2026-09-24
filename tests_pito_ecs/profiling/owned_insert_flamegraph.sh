@@ -10,11 +10,13 @@ case "$MODE" in
         DEFINE=
         TITLE="owned_insert (entity_lock), no work, 4 threads"
         SUFFIX=
+        NAME=insert
         ;;
     v2)
         DEFINE=-DPITO_ECS_OWNED_DELETE_ATOMIC=1
         TITLE="owned_insert (atomic), no work, 4 threads"
         SUFFIX=_v2
+        NAME=insert_atomic
         ;;
     *)
         echo "usage: $0 [v1|v2]" >&2
@@ -27,14 +29,14 @@ BIN="owned_insert_fg$SUFFIX"
 clang -std=c11 -O2 -g -fno-omit-frame-pointer -Wall -Wextra -pthread $DEFINE \
     -o "$BIN" owned_insert_fg.c -lm
 
-sample "$BIN" 12 -wait -file "sample_insert$SUFFIX.txt" &
+sample "$BIN" 12 -wait -file "sample_$NAME.txt" &
 SAMPLE_PID=$!
 
 "./$BIN" &
 
 wait "$SAMPLE_PID"
 
-awk -f "$(brew --prefix flamegraph)/bin/stackcollapse-sample.awk" "sample_insert$SUFFIX.txt" > "collapsed_insert$SUFFIX.txt"
-flamegraph.pl --title "$TITLE" "collapsed_insert$SUFFIX.txt" > "flamegraph_insert$SUFFIX.svg"
+awk -f "$(brew --prefix flamegraph)/bin/stackcollapse-sample.awk" "sample_$NAME.txt" > "collapsed_$NAME.txt"
+flamegraph.pl --title "$TITLE" "collapsed_$NAME.txt" > "fg_$NAME.svg"
 
-echo "wrote flamegraph_insert$SUFFIX.svg"
+echo "wrote fg_$NAME.svg"
