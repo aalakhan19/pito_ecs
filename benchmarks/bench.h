@@ -27,7 +27,7 @@
 #define CI_TARGET 0.05
 #define Z_95      1.96
 
-static const size_t work_levels[] = { 0, 10, 10000 };
+static const size_t work_levels[] = { 0, 10, 500 };
 static const char* work_names[]   = { "none", "light", "heavy" };
 #define WORK_LEVEL_COUNT 3
 
