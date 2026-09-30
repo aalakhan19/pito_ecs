@@ -28,6 +28,17 @@ set(PICO_DIR ${CMAKE_BINARY_DIR}/pico)
 download(https://raw.githubusercontent.com/empyreanx/pico_headers/${PICO_COMMIT}/pico_ecs.h
          ${PICO_DIR}/pico_ecs.h)
 
+set(FLECS_VERSION v4.1.6)
+set(FLECS_DIR ${CMAKE_BINARY_DIR}/flecs)
+download(https://raw.githubusercontent.com/SanderMertens/flecs/${FLECS_VERSION}/distr/flecs.h
+         ${FLECS_DIR}/flecs.h)
+download(https://raw.githubusercontent.com/SanderMertens/flecs/${FLECS_VERSION}/distr/flecs.c
+         ${FLECS_DIR}/flecs.c)
+
+add_library(flecs STATIC ${FLECS_DIR}/flecs.c)
+target_include_directories(flecs PUBLIC ${FLECS_DIR})
+target_link_libraries(flecs PUBLIC Threads::Threads)
+
 string(TOUPPER ${CMAKE_BUILD_TYPE} BUILD_TYPE)
 set(BENCH_FLAGS "${CMAKE_C_FLAGS} ${CMAKE_C_FLAGS_${BUILD_TYPE}}")
 
@@ -44,6 +55,9 @@ function(add_bench name)
     target_compile_definitions(bench_${name}_pico PRIVATE BENCH_PICO)
     target_include_directories(bench_${name}_pico PRIVATE ${PICO_DIR})
 
+    add_bench_executable(bench_${name}_flecs flecs_${name}.c "${BENCH_FLAGS}")
+    target_link_libraries(bench_${name}_flecs PRIVATE flecs)
+
     if(ATOMIC)
         add_bench_executable(bench_${name}_pito owned_${name}.c
                              "${BENCH_FLAGS} -DPITO_ECS_OWNED_DELETE_ATOMIC=1")
@@ -55,8 +69,9 @@ function(add_bench name)
 
     add_custom_target(run_${name}
                       COMMAND bench_${name}_pico
+                      COMMAND bench_${name}_flecs
                       COMMAND bench_${name}_pito
-                      DEPENDS bench_${name}_pico bench_${name}_pito
+                      DEPENDS bench_${name}_pico bench_${name}_flecs bench_${name}_pito
                       USES_TERMINAL)
     add_dependencies(run_all run_${name})
 endfunction()

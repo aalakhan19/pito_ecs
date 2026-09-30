@@ -21,6 +21,7 @@
 #endif
 
 #define MAX_SYSTEMS 32
+#define MAX_ROWS    6
 
 #define MIN_RUNS  10
 #define MAX_RUNS  100
@@ -42,6 +43,13 @@ typedef struct
     double lo;
     double hi;
 } stat_t;
+
+typedef struct
+{
+    int rows;
+    int threads[MAX_ROWS];
+    stat_t stats[MAX_ROWS][WORK_LEVEL_COUNT];
+} baseline_t;
 
 typedef struct bench_s bench_t;
 
@@ -160,15 +168,15 @@ static void print_environment(int threads)
            BENCH_FLAGS);
 }
 
-static void baseline_path(char* path, size_t size, const bench_t* b)
+static void baseline_path(char* path, size_t size, const char* lib, const bench_t* b)
 {
-    snprintf(path, size, "pico_%s.baseline", b->def->name);
+    snprintf(path, size, "%s_%s.baseline", lib, b->def->name);
 }
 
-static bool baseline_read(stat_t* pico, const bench_t* b)
+static bool baseline_read(baseline_t* base, const char* lib, const bench_t* b)
 {
     char path[64];
-    baseline_path(path, sizeof(path), b);
+    baseline_path(path, sizeof(path), lib, b);
 
     FILE* f = fopen(path, "r");
     if (!f)
@@ -176,29 +184,61 @@ static bool baseline_read(stat_t* pico, const bench_t* b)
 
     int systems;
     size_t entities;
-    bool ok = 2 == fscanf(f, "%d %zu", &systems, &entities) && systems == b->system_count &&
-              entities == b->entity_count;
+    bool ok = 3 == fscanf(f, "%d %zu %d", &systems, &entities, &base->rows) &&
+              systems == b->system_count && entities == b->entity_count && base->rows > 0 &&
+              base->rows <= MAX_ROWS;
 
-    for (int w = 0; ok && w < WORK_LEVEL_COUNT; w++)
-        ok = 3 == fscanf(f, "%lf %lf %lf", &pico[w].median, &pico[w].lo, &pico[w].hi);
+    for (int r = 0; ok && r < base->rows; r++)
+    {
+        ok = 1 == fscanf(f, "%d", &base->threads[r]);
+
+        for (int w = 0; ok && w < WORK_LEVEL_COUNT; w++)
+            ok = 3 == fscanf(f,
+                             "%lf %lf %lf",
+                             &base->stats[r][w].median,
+                             &base->stats[r][w].lo,
+                             &base->stats[r][w].hi);
+    }
 
     fclose(f);
     return ok;
 }
 
-static void baseline_write(const stat_t* pico, const bench_t* b)
+static void baseline_write(const baseline_t* base, const char* lib, const bench_t* b)
 {
     char path[64];
-    baseline_path(path, sizeof(path), b);
+    baseline_path(path, sizeof(path), lib, b);
 
     FILE* f = fopen(path, "w");
     if (!f)
         return;
 
-    fprintf(f, "%d %zu\n", b->system_count, b->entity_count);
-    for (int w = 0; w < WORK_LEVEL_COUNT; w++)
-        fprintf(f, "%f %f %f\n", pico[w].median, pico[w].lo, pico[w].hi);
+    fprintf(f, "%d %zu %d\n", b->system_count, b->entity_count, base->rows);
+
+    for (int r = 0; r < base->rows; r++)
+    {
+        fprintf(f, "%d", base->threads[r]);
+
+        for (int w = 0; w < WORK_LEVEL_COUNT; w++)
+            fprintf(f,
+                    " %f %f %f",
+                    base->stats[r][w].median,
+                    base->stats[r][w].lo,
+                    base->stats[r][w].hi);
+
+        fprintf(f, "\n");
+    }
+
     fclose(f);
+}
+
+static const stat_t* baseline_row(const baseline_t* base, int threads)
+{
+    for (int r = 0; r < base->rows; r++)
+        if (base->threads[r] == threads)
+            return base->stats[r];
+
+    return NULL;
 }
 
 static void measure_row(bench_t* b, int variant, int threads, stat_t* stats)
@@ -212,22 +252,40 @@ static void measure_row(bench_t* b, int variant, int threads, stat_t* stats)
     }
 }
 
-static void print_row(
-    const bench_def_t* def, int variant, int threads, const stat_t* stats, const stat_t* pico)
+static void print_speedup(const stat_t* other, stat_t s, bool one_thread)
 {
+    if (!other)
+    {
+        printf(" %10s", "");
+        return;
+    }
+
+    bool overlap = s.lo <= other->hi && other->lo <= s.hi;
+    printf(" %7.2fx%c%c", other->median / s.median, overlap ? '~' : ' ', one_thread ? '*' : ' ');
+}
+
+static void print_row(const bench_def_t* def,
+                      int variant,
+                      int threads,
+                      const stat_t* stats,
+                      const baseline_t* pico,
+                      const baseline_t* flecs)
+{
+
+    const stat_t* pico_row  = pico ? baseline_row(pico, 1) : NULL;
+    const stat_t* flecs_row = flecs ? baseline_row(flecs, threads) : NULL;
+    bool flecs_one_thread   = flecs && !flecs_row;
+
+    if (flecs_one_thread)
+        flecs_row = baseline_row(flecs, 1);
+
     printf("%-6s %-26s %7d", def->lib, def->variants[variant], threads);
 
     for (int w = 0; w < WORK_LEVEL_COUNT; w++)
     {
         printf(" %10.3f +-%3.0f%%", stats[w].median, 100 * ci_width(stats[w]));
-
-        if (pico)
-        {
-            bool overlap = stats[w].lo <= pico[w].hi && pico[w].lo <= stats[w].hi;
-            printf(" %6.2fx%c", pico[w].median / stats[w].median, overlap ? '~' : ' ');
-        }
-        else
-            printf(" %8s", "");
+        print_speedup(pico_row ? &pico_row[w] : NULL, stats[w], false);
+        print_speedup(flecs_row ? &flecs_row[w] : NULL, stats[w], flecs_one_thread);
     }
 
     printf("\n");
@@ -248,10 +306,11 @@ static int bench_main(int argc, char** argv, const bench_def_t* def)
 
     b.system_count = max_threads;
 
-    bool is_pico = strcmp(def->lib, "pico") == 0;
+    bool is_pito = strcmp(def->lib, "pito") == 0;
 
-    stat_t pico[WORK_LEVEL_COUNT];
-    bool has_pico = !is_pico && baseline_read(pico, &b);
+    baseline_t pico, flecs, own = { 0 };
+    bool has_pico  = strcmp(def->lib, "pico") != 0 && baseline_read(&pico, "pico", &b);
+    bool has_flecs = is_pito && baseline_read(&flecs, "flecs", &b);
 
     print_environment(hardware_threads);
     printf("%s (%s): %d systems x %zu entities, median ms +- 95%% CI, %d-%d runs\n",
@@ -264,11 +323,14 @@ static int bench_main(int argc, char** argv, const bench_def_t* def)
     printf("work iterations per entity:");
     for (int w = 0; w < WORK_LEVEL_COUNT; w++)
         printf(" %s = %zu", work_names[w], work_levels[w]);
-    printf("; ~ = CI overlaps pico's, the difference is not significant\n");
+    printf("\n~ = CI overlaps the other library's, the difference is not significant\n");
+
+    if (has_flecs && flecs.rows == 1)
+        printf("* = compared to flecs on 1 thread, it can't run this benchmark in parallel\n");
 
     printf("%-6s %-26s %7s", "lib", "variant", "threads");
     for (int w = 0; w < WORK_LEVEL_COUNT; w++)
-        printf(" %17s %8s", work_names[w], "vs pico");
+        printf(" %17s %8s  %8s  ", work_names[w], "vs pico", "vs flecs");
     printf("\n");
 
     int last_threads = def->serial_only ? 1 : max_threads;
@@ -280,13 +342,19 @@ static int bench_main(int argc, char** argv, const bench_def_t* def)
         for (int threads = 1; threads <= last_threads; threads *= 2)
         {
             measure_row(&b, v, threads, stats);
-            print_row(def, v, threads, stats, has_pico ? pico : NULL);
+            print_row(def, v, threads, stats, has_pico ? &pico : NULL, has_flecs ? &flecs : NULL);
+
+            if (v == 0)
+            {
+                own.threads[own.rows] = threads;
+                memcpy(own.stats[own.rows], stats, sizeof(stats));
+                own.rows++;
+            }
         }
     }
 
-    // pico has 1 row
-    if (is_pico)
-        baseline_write(stats, &b);
+    if (!is_pito)
+        baseline_write(&own, def->lib, &b);
 
     def->cleanup(&b);
     return 0;
