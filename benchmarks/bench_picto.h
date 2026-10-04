@@ -10,6 +10,10 @@
 #define PICO_ECS_MAX_SYSTEMS MAX_SYSTEMS
 #define PITO_ECS_MAX_SYSTEMS MAX_SYSTEMS
 
+// plus the extra one insert/initialize defines
+#define PICO_ECS_MAX_COMPONENTS (MAX_SYSTEMS + 1)
+#define PITO_ECS_MAX_COMPONENTS (MAX_SYSTEMS + 1)
+
 #ifdef BENCH_PICO
 #include "pico_ecs.h"
 #define BENCH_LIB    "pico"
