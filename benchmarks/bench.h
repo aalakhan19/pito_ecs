@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/utsname.h>
 #include <time.h>
 #include <unistd.h>
@@ -18,6 +19,10 @@
 
 #ifndef BENCH_FLAGS
 #define BENCH_FLAGS "unknown"
+#endif
+
+#ifndef BENCH_RESULTS_DIR
+#define BENCH_RESULTS_DIR "results"
 #endif
 
 #define MAX_SYSTEMS 32
@@ -70,6 +75,8 @@ struct bench_s
     size_t entity_count; // pro system
     size_t work_iterations;
     int variant;
+    FILE* csv;
+    char csv_prefix[1024];
 };
 
 static double now_ms(void)
@@ -130,7 +137,20 @@ static stat_t measure(bench_t* b, int thread_count)
     for (int n = 1; n <= MAX_RUNS; n++)
     {
         samples[n - 1] = b->def->run_once(b, thread_count);
-        s              = summarize(samples, n);
+
+        if (b->csv)
+            fprintf(b->csv,
+                    "%s,%s,%s,%s,%d,%zu,%d,%.6f\n",
+                    b->csv_prefix,
+                    b->def->lib,
+                    b->def->name,
+                    b->def->variants[b->variant],
+                    thread_count,
+                    b->work_iterations,
+                    n,
+                    samples[n - 1]);
+
+        s = summarize(samples, n);
 
         if (n >= MIN_RUNS && ci_width(s) <= CI_TARGET)
             break;
@@ -139,11 +159,10 @@ static stat_t measure(bench_t* b, int thread_count)
     return s;
 }
 
-static void print_environment(int threads)
+static void cpu_name(char* cpu, size_t size)
 {
-    char cpu[128] = "unknown";
+    snprintf(cpu, size, "unknown");
 #ifdef __APPLE__
-    size_t size = sizeof(cpu);
     sysctlbyname("machdep.cpu.brand_string", cpu, &size, NULL, 0);
 #else
     FILE* f = fopen("/proc/cpuinfo", "r");
@@ -154,18 +173,76 @@ static void print_environment(int threads)
     if (f)
         fclose(f);
 #endif
+}
+
+static void print_environment(FILE* out, int threads)
+{
+    char cpu[128];
+    cpu_name(cpu, sizeof(cpu));
 
     struct utsname os;
     uname(&os);
 
-    printf("cpu: %s (%d hardware threads), os: %s %s %s, compiler: %s, flags: %s\n",
-           cpu,
-           threads,
-           os.sysname,
-           os.release,
-           os.machine,
-           __VERSION__,
-           BENCH_FLAGS);
+    fprintf(out,
+            "cpu: %s (%d hardware threads), os: %s %s %s, compiler: %s, flags: %s\n",
+            cpu,
+            threads,
+            os.sysname,
+            os.release,
+            os.machine,
+            __VERSION__,
+            BENCH_FLAGS);
+}
+
+static FILE* csv_open(bench_t* b)
+{
+    char host[64] = "unknown";
+    gethostname(host, sizeof(host) - 1);
+
+    char run[32];
+    const char* run_id = getenv("BENCH_RUN_ID");
+    if (!run_id)
+    {
+        time_t now = time(NULL);
+        strftime(run, sizeof(run), "%Y-%m-%d_%H-%M-%S", localtime(&now));
+        run_id = run;
+    }
+
+    char path[256];
+    snprintf(path, sizeof(path), BENCH_RESULTS_DIR "/%s_%s.csv", host, run_id);
+
+    mkdir(BENCH_RESULTS_DIR, 0755);
+
+    FILE* f = fopen(path, "a");
+    if (!f)
+        return NULL;
+
+    char cpu[128];
+    cpu_name(cpu, sizeof(cpu));
+
+    struct utsname os;
+    uname(&os);
+
+    snprintf(b->csv_prefix,
+             sizeof(b->csv_prefix),
+             "%s,\"%s\",%ld,\"%s %s %s\",\"%s\",\"%s\",%d,%zu",
+             host,
+             cpu,
+             sysconf(_SC_NPROCESSORS_ONLN),
+             os.sysname,
+             os.release,
+             os.machine,
+             __VERSION__,
+             BENCH_FLAGS,
+             b->system_count,
+             b->entity_count);
+
+    if (ftell(f) == 0)
+        fputs("host,cpu,hardware_threads,os,compiler,flags,systems,entities,"
+              "lib,bench,variant,threads,work_iterations,run,ms\n",
+              f);
+
+    return f;
 }
 
 static void baseline_path(char* path, size_t size, const char* lib, const bench_t* b)
@@ -312,7 +389,8 @@ static int bench_main(int argc, char** argv, const bench_def_t* def)
     bool has_pico  = strcmp(def->lib, "pico") != 0 && baseline_read(&pico, "pico", &b);
     bool has_flecs = is_pito && baseline_read(&flecs, "flecs", &b);
 
-    print_environment(hardware_threads);
+    print_environment(stdout, hardware_threads);
+    b.csv = csv_open(&b);
     printf("%s (%s): %d systems x %zu entities, median ms +- 95%% CI, %d-%d runs\n",
            def->name,
            def->lib,
@@ -355,6 +433,9 @@ static int bench_main(int argc, char** argv, const bench_def_t* def)
 
     if (!is_pito)
         baseline_write(&own, def->lib, &b);
+
+    if (b.csv)
+        fclose(b.csv);
 
     def->cleanup(&b);
     return 0;
