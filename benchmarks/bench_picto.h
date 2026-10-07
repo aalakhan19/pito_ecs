@@ -7,7 +7,7 @@
 
 #define PICO_ECS_IMPLEMENTATION
 #define PITO_ECS_IMPLEMENTATION
-#define PICO_ECS_MAX_SYSTEMS MAX_SYSTEMS
+#define PICO_ECS_MAX_SYSTEMS (MAX_SYSTEMS + 1)
 #define PITO_ECS_MAX_SYSTEMS (2 * MAX_SYSTEMS)
 
 // one local store per thread (owned_local)
