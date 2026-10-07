@@ -21,6 +21,8 @@ static ecs_ret_t delete_system(ecs_t* ecs, ecs_entity_t* entities, size_t entity
 
 static void setup(bench_t* b)
 {
+    ecs_comp_t base = ecs_define_component(ecs, sizeof(value_t), NULL);
+
     for (int i = 0; i < b->system_count; i++)
     {
         ctx[i].comp = ecs_define_component(ecs, sizeof(value_t), NULL);
@@ -31,11 +33,20 @@ static void setup(bench_t* b)
 #endif
         systems[i] = ecs_define_system(ecs, delete_system, &desc);
         ecs_require(ecs, systems[i], ctx[i].comp);
+
+        // never run but joined by every remove
+        if (b->variant == 1)
+        {
+            ecs_system_t follower = ecs_define_system(ecs, delete_system, &(ecs_sys_desc_t){ 0 });
+            ecs_require(ecs, follower, base);
+            ecs_exclude(ecs, follower, ctx[i].comp);
+        }
     }
 
     for (size_t e = 0; e < b->entity_count; e++)
     {
         ecs_entity_t entity = ecs_create(ecs);
+        ecs_add(ecs, entity, base, NULL);
 
         for (int i = 0; i < b->system_count; i++)
             ecs_add(ecs, entity, ctx[i].comp, NULL);
@@ -52,6 +63,6 @@ static void finish(bench_t* b)
 
 int main(int argc, char** argv)
 {
-    bench_def_t def = BENCH_PICTO_DEF("owned_delete", "ecs_remove_owned", NULL);
+    bench_def_t def = BENCH_PICTO_DEF("owned_delete", "ecs_remove_owned", "ecs_remove_owned + join");
     return bench_main(argc, argv, &def);
 }

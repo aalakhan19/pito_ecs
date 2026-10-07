@@ -36,6 +36,13 @@ static void setup(bench_t* b)
         systems[i] = ecs_define_system(ecs, insert_system, &desc);
         ecs_require(ecs, systems[i], base);
         ecs_exclude(ecs, systems[i], ctx[i].comp);
+
+        // never run but joined by every insert
+        if (b->variant == 1)
+        {
+            ecs_system_t follower = ecs_define_system(ecs, insert_system, &(ecs_sys_desc_t){ 0 });
+            ecs_require(ecs, follower, ctx[i].comp);
+        }
     }
 
     for (size_t e = 0; e < b->entity_count; e++)
@@ -55,6 +62,6 @@ static void finish(bench_t* b)
 
 int main(int argc, char** argv)
 {
-    bench_def_t def = BENCH_PICTO_DEF("owned_insert", "ecs_insert_owned", NULL);
+    bench_def_t def = BENCH_PICTO_DEF("owned_insert", "ecs_insert_owned", "ecs_insert_owned + join");
     return bench_main(argc, argv, &def);
 }
