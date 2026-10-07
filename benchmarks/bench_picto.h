@@ -10,6 +10,9 @@
 #define PICO_ECS_MAX_SYSTEMS MAX_SYSTEMS
 #define PITO_ECS_MAX_SYSTEMS (2 * MAX_SYSTEMS)
 
+// one local store per thread (owned_local)
+#define PITO_ECS_MAX_OWNED_LOCALS MAX_SYSTEMS
+
 // plus the extra one insert/initialize defines
 #define PICO_ECS_MAX_COMPONENTS (MAX_SYSTEMS + 1)
 #define PITO_ECS_MAX_COMPONENTS (MAX_SYSTEMS + 1)
@@ -131,9 +134,9 @@ static void picto_cleanup(bench_t* b)
 }
 
 #ifdef BENCH_PICO
-#define BENCH_PICTO_DEF(name, v0, v1)                                                              \
+#define BENCH_PICTO_DEF(name, ...)                                                                 \
     { name, BENCH_LIB, { "", NULL }, BENCH_SERIAL, picto_run_once, picto_cleanup }
 #else
-#define BENCH_PICTO_DEF(name, v0, v1)                                                              \
-    { name, BENCH_LIB, { v0, v1 }, BENCH_SERIAL, picto_run_once, picto_cleanup }
+#define BENCH_PICTO_DEF(name, ...)                                                                 \
+    { name, BENCH_LIB, { __VA_ARGS__ }, BENCH_SERIAL, picto_run_once, picto_cleanup }
 #endif

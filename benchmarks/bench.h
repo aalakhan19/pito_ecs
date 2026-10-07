@@ -62,7 +62,7 @@ typedef struct
 {
     const char* name;
     const char* lib;
-    const char* variants[2];
+    const char* variants[3];
     bool serial_only;
     double (*run_once)(bench_t* b, int thread_count); // returns the timed ms, setup excluded
     void (*cleanup)(bench_t* b);
@@ -415,7 +415,7 @@ static int bench_main(int argc, char** argv, const bench_def_t* def)
 
     stat_t stats[WORK_LEVEL_COUNT];
 
-    for (int v = 0; v < 2 && def->variants[v]; v++)
+    for (int v = 0; v < 3 && def->variants[v]; v++)
     {
         for (int threads = 1; threads <= last_threads; threads *= 2)
         {
