@@ -27,11 +27,23 @@ selected() {
     [ -z "$1" ] || case " $1 " in *" $2 "*) true ;; *) false ;; esac
 }
 
+since() {
+    s=$(($(date +%s) - $1))
+    printf '%dh %02dm %02ds' $((s / 3600)) $((s % 3600 / 60)) $((s % 60))
+}
+
+start=$(date +%s)
+
 for bench in update insert delete initialize local; do
     selected "$types" $bench || continue
 
     for lib in pico flecs pito pito_atomic; do
         selected "$libs" $lib || continue
+        t=$(date +%s)
         ./bench_${bench}_${lib} || exit 1
+        echo "bench_${bench}_${lib} took $(since $t)"
+        echo
     done
 done
+
+echo "total: $(since $start)"
