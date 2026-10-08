@@ -82,6 +82,7 @@ add_bench(delete)
 add_bench(initialize)
 add_bench(local)
 add_bench(shared)
+add_bench(mixed)
 
 add_custom_target(run_all
                   COMMAND sh ${CMAKE_SOURCE_DIR}/run.sh
