@@ -28,7 +28,7 @@ static void setup(bench_t* b)
 
         ecs_sys_desc_t desc = { .udata = &ctx[i] };
 #ifndef BENCH_PICO
-        desc.owned_update = true;
+        desc.owned_update = ctx[i].variant != 2;
 #endif
         systems[i] = ecs_define_system(ecs, update_system, &desc);
         ecs_require(ecs, systems[i], ctx[i].comp);
@@ -50,6 +50,6 @@ static void finish(bench_t* b)
 
 int main(int argc, char** argv)
 {
-    bench_def_t def = BENCH_PICTO_DEF("owned_update", "ecs_get", "ecs_get_raw");
+    bench_def_t def = BENCH_PICTO_DEF("owned_update", "ecs_get", "ecs_get_raw", "locked");
     return bench_main(argc, argv, &def);
 }
