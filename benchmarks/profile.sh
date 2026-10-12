@@ -2,7 +2,7 @@
 # usage: [DURATION=30] [PROFILE_RUN_ID=...] profile.sh <bench> <pito|pito_atomic> <variant> <threads> <work> [entities]
 # Output in profiles/<host>_<run id>/ (run id defaults to the date, like the CSVs; set it to collect several
 # profiles in one folder): <name>.svg (timed work), <name>.reversed.svg (same, by leaf), <name>.full.svg (whole
-# process), the collapsed stacks they're drawn from, and info.txt. Binaries and raw samples go to profiles/tmp/.
+# process), the collapsed stacks they're drawn from, and info.txt. Binary and raw samples live in a temp dir, deleted on exit.
 # macOS: sample + brew flamegraph. Linux: perf, perl, addr2line, FlameGraph in $FLAMEGRAPH_DIR (default ~/FlameGraph),
 # kernel.perf_event_paranoid <= 1 (or sudo); libc6-dbg names libc's internals.
 set -e
@@ -14,8 +14,10 @@ DURATION=${DURATION:-30}
 NAME="${BENCH}_${LIB}_v${VARIANT}_t${THREADS}_w${WORK}"
 DIR=profiles/$(hostname -s)_${PROFILE_RUN_ID:-$(date +%Y-%m-%d_%H-%M-%S)}
 OUT=$DIR/$NAME
-TMP=profiles/tmp/$NAME
-mkdir -p "$DIR" profiles/tmp
+SCRATCH=$(cd "$(mktemp -d)" && pwd -P)
+trap 'rm -rf "$SCRATCH"' EXIT
+TMP=$SCRATCH/$NAME
+mkdir -p "$DIR"
 
 CFLAGS="-std=gnu11 -O3 -g -DNDEBUG -fno-omit-frame-pointer -pthread -I.."
 case $LIB in
@@ -41,7 +43,7 @@ EOF
 
 cc $CFLAGS -DBENCH_FLAGS="\"$CFLAGS\"" -o "$TMP" "owned_$BENCH.c" -lm
 # Profiling mode: repeats this one configuration until the time is up, no CSV.
-"./$TMP" "$ENTITIES" "$VARIANT" "$THREADS" "$WORK" $((DURATION + 1)) &
+"$TMP" "$ENTITIES" "$VARIANT" "$THREADS" "$WORK" $((DURATION + 1)) &
 PID=$!
 if [ "$(uname)" = Darwin ]; then
     sample "$PID" "$DURATION" -file "$TMP.sample.txt" > /dev/null 2>&1
@@ -65,7 +67,7 @@ if [ "$(uname)" = Darwin ]; then
         | awk -f "$FG/stackcollapse-sample.awk" | sed -E 's/[^;` ]+`//g' > "$TMP.raw.txt"
 else
     perf script --no-inline -F comm,tid,ip,sym,dso -i "$TMP.perf.data" > "$TMP.perf.txt" 2> /dev/null
-    perl profile_lines.pl "$(pwd -P)/$TMP" "$TMP.perf.txt" | "$FG/stackcollapse-perf.pl" \
+    perl profile_lines.pl "$TMP" "$TMP.perf.txt" | "$FG/stackcollapse-perf.pl" \
         | sed -E 's/_\[i\]|@@GLIBC_[0-9.]+//g' > "$TMP.raw.txt"
 fi
 # Thread name dropped: every run starts new workers, which would otherwise be thousands of slivers.
