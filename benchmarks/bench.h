@@ -129,7 +129,7 @@ static void measure(bench_t* b, int thread_count)
         samples[n - 1] = b->def->run_once(b, thread_count);
 
         fprintf(b->csv,
-                "%s,%s,%s,%s,%d,%zu,%d,%.6f\n",
+                "%s,%s,%s,\"%s\",%d,%zu,%d,%.6f\n",
                 b->csv_prefix,
                 b->def->lib,
                 b->def->name,
@@ -238,7 +238,32 @@ static int bench_main(int argc, char** argv, const bench_def_t* def)
         max_threads *= 2;
 
     b.system_count = max_threads;
-    b.csv          = csv_open(&b);
+
+    // profiling mode
+    if (argc > 2)
+    {
+        b.variant         = atoi(argv[2]);
+        int threads       = argc > 3 ? atoi(argv[3]) : 1;
+        b.work_iterations = argc > 4 ? strtoul(argv[4], NULL, 10) : 0;
+        double seconds    = argc > 5 ? atof(argv[5]) : 10;
+
+        if (b.variant < 0 || b.variant > 2 || !def->variants[b.variant] || threads < 1 ||
+            threads > (def->serial_only ? 1 : max_threads))
+        {
+            fprintf(
+                stderr, "%s: invalid variant %d or threads %d\n", def->name, b.variant, threads);
+            return 1;
+        }
+
+        double end = now_ms() + seconds * 1e3;
+        while (now_ms() < end)
+            def->run_once(&b, threads);
+
+        def->cleanup(&b);
+        return 0;
+    }
+
+    b.csv = csv_open(&b);
 
     if (!b.csv)
     {

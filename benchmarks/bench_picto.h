@@ -41,7 +41,7 @@ static ecs_system_t systems[MAX_SYSTEMS];
 static bench_ctx_t ctx[MAX_SYSTEMS];
 
 static void setup(bench_t* b);
-static void finish(bench_t* b);
+__attribute__((noinline)) static void finish(bench_t* b);
 
 typedef struct
 {
@@ -54,7 +54,7 @@ static atomic_int ready;
 static atomic_int go;
 static atomic_int done;
 
-static void run_systems(thread_args_t* args)
+__attribute__((noinline)) static void run_systems(thread_args_t* args)
 {
     for (int i = args->thread_index; i < args->b->system_count; i += args->thread_count)
         ecs_run_system(ecs, systems[i], 0);
