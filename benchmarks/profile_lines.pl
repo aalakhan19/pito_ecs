@@ -3,18 +3,36 @@
 # Rewrites every frame of <binary> as its inline chain, outermost first: fn@file:line->fn@file:line.
 # stackcollapse-perf.pl splits on "->", so inlined functions become frames of their own.
 # All addresses go through one addr2line call; perf's own srcline forks one per frame (and fails on kcore).
-# Expects perf script --no-inline output of a --call-graph dwarf recording (caller addresses already - 1).
+# Expects perf script --no-inline -F ...,sym,symoff,dso output of a --call-graph dwarf recording.
 use strict;
 use warnings;
 
 my ($bin, $in) = @ARGV;
-my $frame = qr/^(\s+)([0-9a-f]+) (\S+) \(\Q$bin\E\)$/;
+my $frame = qr/^(\s+)([0-9a-f]+) (\S+)\+0x([0-9a-f]+) \(\Q$bin\E\)$/;
+
+# perf prints runtime addresses on some versions and file offsets on others, so the file address
+# addr2line needs is rebuilt from symbol + offset instead.
+my %sym;
+open my $nm, '-|', 'nm', '--defined-only', $bin or die "nm: $!";
+while (<$nm>)
+{
+    $sym{$2} = hex($1) if /^([0-9a-f]+) \S (\S+)$/;
+}
+close $nm;
+
+sub file_addr
+{
+    my ($name, $off) = @_;
+    return exists $sym{$name} ? sprintf("%x", $sym{$name} + hex($off)) : undef;
+}
 
 my %chain;
 open my $f, '<', $in or die "$in: $!";
 while (<$f>)
 {
-    $chain{$2} = undef if /$frame/;
+    next unless /$frame/;
+    my $addr = file_addr($3, $4);
+    $chain{$addr} = '' if defined $addr;
 }
 close $f;
 
@@ -35,6 +53,7 @@ if (@addrs)
         my $line = <$a2l>;
         chomp $line;
         $line =~ s/ \(discriminator \d+\)//;
+        next if $fn eq '??';
         push @fns, $line =~ /^[^?].*:[1-9]\d*$/ ? "$fn\@$line" : $fn;
     }
     $chain{$addr} = join('->', reverse @fns) if defined $addr;
@@ -44,9 +63,10 @@ if (@addrs)
 open $f, '<', $in or die "$in: $!";
 while (<$f>)
 {
-    if (/$frame/ && defined $chain{$2} && $chain{$2} ne '')
+    if (/$frame/)
     {
-        $_ = "$1$2 $chain{$2} ($bin)\n";
+        my $addr = file_addr($3, $4);
+        $_ = "$1$2 $chain{$addr} ($bin)\n" if defined $addr && $chain{$addr} ne '';
     }
     print;
 }

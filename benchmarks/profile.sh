@@ -66,7 +66,7 @@ if [ "$(uname)" = Darwin ]; then
     sed -E 's/^([^0-9]*[0-9]+ )([^ ]+)(  \(in .*  )([^ ]+:[0-9]+)$/\1\2@\4\3\4/' "$TMP.sample.txt" \
         | awk -f "$FG/stackcollapse-sample.awk" | sed -E 's/[^;` ]+`//g' > "$TMP.raw.txt"
 else
-    perf script --no-inline -F comm,tid,ip,sym,dso -i "$TMP.perf.data" > "$TMP.perf.txt" 2> /dev/null
+    perf script --no-inline -F comm,tid,ip,sym,symoff,dso -i "$TMP.perf.data" > "$TMP.perf.txt" 2> /dev/null
     perl profile_lines.pl "$TMP" "$TMP.perf.txt" | "$FG/stackcollapse-perf.pl" \
         | sed -E 's/_\[i\]|@@GLIBC_[0-9.]+//g' > "$TMP.raw.txt"
 fi
