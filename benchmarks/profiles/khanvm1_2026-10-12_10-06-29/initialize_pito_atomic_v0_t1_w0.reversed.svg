@@ -1,0 +1,2882 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1800" height="390" onload="init(evt)" viewBox="0 0 1800 390" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (1 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1800.0" height="390.0" fill="url(#background)"  />
+<text id="title" x="900.00" y="24" >initialize_pito_atomic_v0_t1_w0 (reversed)</text>
+<text id="details" x="10.00" y="373" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1690.00" y="24" >Search</text>
+<text id="ignorecase" x="1774.00" y="24" >ic</text>
+<text id="matched" x="1690.00" y="373" > </text>
+<g id="frames">
+<g >
+<title>idle_cpu (1 samples, 0.02%)</title><rect x="1485.7" y="52" width="0.4" height="15.0" fill="rgb(238,184,36)" rx="2" ry="2" />
+<text  x="1488.67" y="62.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (3 samples, 0.07%)</title><rect x="1004.8" y="68" width="1.2" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1007.79" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1888 (6 samples, 0.13%)</title><rect x="374.1" y="52" width="2.4" height="15.0" fill="rgb(237,199,36)" rx="2" ry="2" />
+<text  x="377.10" y="62.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:13 (1 samples, 0.02%)</title><rect x="1485.3" y="164" width="0.4" height="15.0" fill="rgb(240,161,39)" rx="2" ry="2" />
+<text  x="1488.27" y="174.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1783.7" y="212" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1786.71" y="222.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:1987 (1 samples, 0.02%)</title><rect x="52.5" y="68" width="0.4" height="15.0" fill="rgb(238,199,37)" rx="2" ry="2" />
+<text  x="55.47" y="78.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1685.8" y="100" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1688.80" y="110.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1789.2" y="164" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1792.21" y="174.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1906 (1 samples, 0.02%)</title><rect x="1786.9" y="84" width="0.3" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="1789.85" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2015 (60 samples, 1.33%)</title><rect x="182.2" y="52" width="23.6" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="185.22" y="62.5" >e..</text>
+</g>
+<g >
+<title>tick_do_update_jiffies64 (1 samples, 0.02%)</title><rect x="1789.2" y="116" width="0.4" height="15.0" fill="rgb(235,142,33)" rx="2" ry="2" />
+<text  x="1792.21" y="126.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (28 samples, 0.62%)</title><rect x="329.7" y="100" width="11.0" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="332.67" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2008 (98 samples, 2.16%)</title><rect x="12.0" y="84" width="38.5" height="15.0" fill="rgb(240,199,38)" rx="2" ry="2" />
+<text  x="14.97" y="94.5" >ecs..</text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (98 samples, 2.16%)</title><rect x="12.0" y="132" width="38.5" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="14.97" y="142.5" >run..</text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1782.9" y="164" width="0.8" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1785.92" y="174.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1789.6" y="308" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1792.61" y="318.5" ></text>
+</g>
+<g >
+<title>kvm_sched_clock_read (1 samples, 0.02%)</title><rect x="1783.7" y="68" width="0.4" height="15.0" fill="rgb(241,130,40)" rx="2" ry="2" />
+<text  x="1786.71" y="78.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1788.0" y="196" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1791.03" y="206.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1688.2" y="244" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1691.16" y="254.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1786.1" y="84" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1789.07" y="94.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (2 samples, 0.04%)</title><rect x="10.0" y="260" width="0.8" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="13.00" y="270.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.02%)</title><rect x="1687.8" y="84" width="0.4" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1690.77" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (1 samples, 0.02%)</title><rect x="53.6" y="100" width="0.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="56.64" y="110.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1787.2" y="148" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1790.25" y="158.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1785.7" y="180" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1788.67" y="190.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (24 samples, 0.53%)</title><rect x="251.8" y="84" width="9.5" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="254.82" y="94.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 0.02%)</title><rect x="1784.9" y="292" width="0.4" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="1787.89" y="302.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1782.1" y="180" width="0.8" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1785.14" y="190.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="369.4" y="116" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="372.38" y="126.5" ></text>
+</g>
+<g >
+<title>sched_clock_cpu (1 samples, 0.02%)</title><rect x="1783.7" y="116" width="0.4" height="15.0" fill="rgb(238,164,36)" rx="2" ry="2" />
+<text  x="1786.71" y="126.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1785.7" y="164" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1788.67" y="174.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1899 (3 samples, 0.07%)</title><rect x="363.5" y="52" width="1.2" height="15.0" fill="rgb(235,199,33)" rx="2" ry="2" />
+<text  x="366.48" y="62.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1781.7" y="212" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1784.74" y="222.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1685.4" y="100" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1688.41" y="110.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (627 samples, 13.85%)</title><rect x="1227.7" y="68" width="246.6" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1230.73" y="78.5" >finish@owned_initialize.c:57</text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (1 samples, 0.02%)</title><rect x="381.2" y="84" width="0.4" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="384.18" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (719 samples, 15.88%)</title><rect x="522.7" y="68" width="282.7" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="525.73" y="78.5" >ecs_sync_owned@pito_ecs.h:2037</text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (1 samples, 0.02%)</title><rect x="11.6" y="132" width="0.4" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="14.57" y="142.5" ></text>
+</g>
+<g >
+<title>vma_alloc_folio_noprof (1 samples, 0.02%)</title><rect x="1688.2" y="84" width="0.4" height="15.0" fill="rgb(246,112,45)" rx="2" ry="2" />
+<text  x="1691.16" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2001 (12 samples, 0.27%)</title><rect x="376.5" y="68" width="4.7" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="379.46" y="78.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1787.6" y="52" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1790.64" y="62.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1684.6" y="68" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1687.62" y="78.5" ></text>
+</g>
+<g >
+<title>_raw_spin_unlock_irqrestore (1 samples, 0.02%)</title><rect x="50.9" y="52" width="0.4" height="15.0" fill="rgb(246,166,45)" rx="2" ry="2" />
+<text  x="53.89" y="62.5" ></text>
+</g>
+<g >
+<title>tick_program_event (1 samples, 0.02%)</title><rect x="1685.4" y="84" width="0.4" height="15.0" fill="rgb(241,142,39)" rx="2" ry="2" />
+<text  x="1688.41" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3035 (28 samples, 0.62%)</title><rect x="329.7" y="68" width="11.0" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="332.67" y="78.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (1 samples, 0.02%)</title><rect x="1688.2" y="228" width="0.4" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="1691.16" y="238.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.02%)</title><rect x="1687.4" y="84" width="0.4" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1690.38" y="94.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1687.8" y="132" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1690.77" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (1 samples, 0.02%)</title><rect x="1485.7" y="196" width="0.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1488.67" y="206.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1789.2" y="260" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1792.21" y="270.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 0.02%)</title><rect x="63.1" y="100" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="66.08" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="54.0" y="116" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="57.04" y="126.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1785.7" y="148" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1788.67" y="158.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1899 (49 samples, 1.08%)</title><rect x="1735.0" y="68" width="19.2" height="15.0" fill="rgb(235,199,33)" rx="2" ry="2" />
+<text  x="1737.95" y="78.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 0.02%)</title><rect x="1784.9" y="276" width="0.4" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="1787.89" y="286.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="62.7" y="132" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="65.69" y="142.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1485.7" y="148" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1488.67" y="158.5" ></text>
+</g>
+<g >
+<title>irq_exit_rcu (1 samples, 0.02%)</title><rect x="50.5" y="132" width="0.4" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="53.50" y="142.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (2 samples, 0.04%)</title><rect x="1782.9" y="100" width="0.8" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1785.92" y="110.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1687.4" y="180" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1690.38" y="190.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="51.3" y="180" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="54.29" y="190.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 0.02%)</title><rect x="63.1" y="132" width="0.4" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="66.08" y="142.5" ></text>
+</g>
+<g >
+<title>get_page_from_freelist (1 samples, 0.02%)</title><rect x="1785.3" y="84" width="0.4" height="15.0" fill="rgb(232,170,30)" rx="2" ry="2" />
+<text  x="1788.28" y="94.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1485.7" y="100" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1488.67" y="110.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1788.4" y="180" width="0.8" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1791.43" y="190.5" ></text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1890 (13 samples, 0.29%)</title><rect x="376.5" y="52" width="5.1" height="15.0" fill="rgb(233,199,31)" rx="2" ry="2" />
+<text  x="379.46" y="62.5" ></text>
+</g>
+<g >
+<title>sched_tick (2 samples, 0.04%)</title><rect x="1788.4" y="68" width="0.8" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1791.43" y="78.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1485.7" y="132" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1488.67" y="142.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 0.02%)</title><rect x="63.1" y="116" width="0.4" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="66.08" y="126.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (2 samples, 0.04%)</title><rect x="10.8" y="164" width="0.8" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="13.79" y="174.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (60 samples, 1.33%)</title><rect x="182.2" y="68" width="23.6" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="185.22" y="78.5" >i..</text>
+</g>
+<g >
+<title>perf_event_task_tick (1 samples, 0.02%)</title><rect x="1687.8" y="68" width="0.4" height="15.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="1690.77" y="78.5" ></text>
+</g>
+<g >
+<title>pvclock_clocksource_read_nowd (6 samples, 0.13%)</title><rect x="1781.7" y="52" width="2.4" height="15.0" fill="rgb(243,163,41)" rx="2" ry="2" />
+<text  x="1784.74" y="62.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (49 samples, 1.08%)</title><rect x="1735.0" y="52" width="19.2" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1737.95" y="62.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1789.2" y="212" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1792.21" y="222.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2035 (93 samples, 2.05%)</title><rect x="293.1" y="68" width="36.6" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="296.10" y="78.5" >ecs..</text>
+</g>
+<g >
+<title>all (4,527 samples, 100%)</title><rect x="10.0" y="36" width="1780.0" height="15.0" fill="rgb(255,230,55)" rx="2" ry="2" />
+<text  x="13.00" y="46.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (1 samples, 0.02%)</title><rect x="1786.9" y="68" width="0.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1789.85" y="78.5" ></text>
+</g>
+<g >
+<title>__timekeeping_advance (1 samples, 0.02%)</title><rect x="1789.2" y="84" width="0.4" height="15.0" fill="rgb(251,128,51)" rx="2" ry="2" />
+<text  x="1792.21" y="94.5" ></text>
+</g>
+<g >
+<title>memset@plt (1 samples, 0.02%)</title><rect x="1787.6" y="148" width="0.4" height="15.0" fill="rgb(231,144,29)" rx="2" ry="2" />
+<text  x="1790.64" y="158.5" ></text>
+</g>
+<g >
+<title>__rmqueue_pcplist (1 samples, 0.02%)</title><rect x="1784.9" y="68" width="0.4" height="15.0" fill="rgb(232,135,30)" rx="2" ry="2" />
+<text  x="1787.89" y="78.5" ></text>
+</g>
+<g >
+<title>memset@string_fortified.h:59 (98 samples, 2.16%)</title><rect x="12.0" y="68" width="38.5" height="15.0" fill="rgb(225,144,23)" rx="2" ry="2" />
+<text  x="14.97" y="78.5" >mem..</text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2595 (61 samples, 1.35%)</title><rect x="329.7" y="52" width="24.0" height="15.0" fill="rgb(244,199,42)" rx="2" ry="2" />
+<text  x="332.67" y="62.5" >e..</text>
+</g>
+<g >
+<title>get_page_from_freelist (1 samples, 0.02%)</title><rect x="1784.5" y="68" width="0.4" height="15.0" fill="rgb(232,170,30)" rx="2" ry="2" />
+<text  x="1787.50" y="78.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:13 (58 samples, 1.28%)</title><rect x="1486.1" y="52" width="22.8" height="15.0" fill="rgb(240,161,39)" rx="2" ry="2" />
+<text  x="1489.06" y="62.5" >i..</text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1687.4" y="228" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1690.38" y="238.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1788.4" y="164" width="0.8" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1791.43" y="174.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1687.8" y="164" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1690.77" y="174.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (267 samples, 5.90%)</title><rect x="805.4" y="84" width="105.0" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="808.44" y="94.5" >finish@owned..</text>
+</g>
+<g >
+<title>alloc_anon_folio (1 samples, 0.02%)</title><rect x="1784.5" y="132" width="0.4" height="15.0" fill="rgb(246,128,45)" rx="2" ry="2" />
+<text  x="1787.50" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2008 (3 samples, 0.07%)</title><rect x="1686.2" y="84" width="1.2" height="15.0" fill="rgb(240,199,38)" rx="2" ry="2" />
+<text  x="1689.20" y="94.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 0.02%)</title><rect x="51.7" y="132" width="0.4" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="54.68" y="142.5" ></text>
+</g>
+<g >
+<title>sched_balance_softirq (1 samples, 0.02%)</title><rect x="50.5" y="84" width="0.4" height="15.0" fill="rgb(239,164,37)" rx="2" ry="2" />
+<text  x="53.50" y="94.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1788.0" y="116" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1791.03" y="126.5" ></text>
+</g>
+<g >
+<title>clockevents_program_event (1 samples, 0.02%)</title><rect x="1685.4" y="68" width="0.4" height="15.0" fill="rgb(241,102,39)" rx="2" ry="2" />
+<text  x="1688.41" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1786.9" y="116" width="0.3" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1789.85" y="126.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (54 samples, 1.19%)</title><rect x="161.0" y="68" width="21.2" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="163.99" y="78.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="52.1" y="148" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="55.07" y="158.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1786.5" y="84" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1789.46" y="94.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (2 samples, 0.04%)</title><rect x="1788.4" y="116" width="0.8" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1791.43" y="126.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="51.3" y="228" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="54.29" y="238.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1787.2" y="116" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1790.25" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2035 (1 samples, 0.02%)</title><rect x="1783.3" y="196" width="0.4" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="1786.32" y="206.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="11.6" y="164" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="14.57" y="174.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 0.02%)</title><rect x="63.1" y="148" width="0.4" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="66.08" y="158.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (1 samples, 0.02%)</title><rect x="1785.3" y="276" width="0.4" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="1788.28" y="286.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1784.1" y="132" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1787.10" y="142.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1685.8" y="148" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1688.80" y="158.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.02%)</title><rect x="1789.6" y="148" width="0.4" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1792.61" y="158.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:22 (23 samples, 0.51%)</title><rect x="354.4" y="68" width="9.1" height="15.0" fill="rgb(241,161,40)" rx="2" ry="2" />
+<text  x="357.44" y="78.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (1 samples, 0.02%)</title><rect x="1688.2" y="116" width="0.4" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="1691.16" y="126.5" ></text>
+</g>
+<g >
+<title>__alloc_frozen_pages_noprof (1 samples, 0.02%)</title><rect x="1784.5" y="84" width="0.4" height="15.0" fill="rgb(246,151,45)" rx="2" ry="2" />
+<text  x="1787.50" y="94.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="51.3" y="148" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="54.29" y="158.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1687.8" y="148" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1690.77" y="158.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:13 (1 samples, 0.02%)</title><rect x="61.9" y="68" width="0.4" height="15.0" fill="rgb(240,161,39)" rx="2" ry="2" />
+<text  x="64.90" y="78.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 0.02%)</title><rect x="1785.3" y="212" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1788.28" y="222.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="51.7" y="196" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="54.68" y="206.5" ></text>
+</g>
+<g >
+<title>sched_clock_noinstr (1 samples, 0.02%)</title><rect x="1783.7" y="84" width="0.4" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1786.71" y="94.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 0.02%)</title><rect x="11.6" y="84" width="0.4" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="14.57" y="94.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (167 samples, 3.69%)</title><rect x="63.5" y="100" width="65.6" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="66.47" y="110.5" >run_sys..</text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1906 (1 samples, 0.02%)</title><rect x="62.7" y="84" width="0.4" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="65.69" y="94.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1787.2" y="164" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1790.25" y="174.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2005 (1 samples, 0.02%)</title><rect x="1784.1" y="196" width="0.4" height="15.0" fill="rgb(245,199,44)" rx="2" ry="2" />
+<text  x="1787.10" y="206.5" ></text>
+</g>
+<g >
+<title>ecs_sparse_set_find@pito_ecs.h:2928 (7 samples, 0.15%)</title><rect x="381.6" y="52" width="2.7" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="384.57" y="62.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (1 samples, 0.02%)</title><rect x="1784.5" y="164" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1787.50" y="174.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="51.3" y="132" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="54.29" y="142.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (1 samples, 0.02%)</title><rect x="63.1" y="52" width="0.4" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="66.08" y="62.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="369.4" y="100" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="372.38" y="110.5" ></text>
+</g>
+<g >
+<title>rmqueue_bulk (1 samples, 0.02%)</title><rect x="1784.9" y="52" width="0.4" height="15.0" fill="rgb(226,131,23)" rx="2" ry="2" />
+<text  x="1787.89" y="62.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (1 samples, 0.02%)</title><rect x="54.0" y="100" width="0.4" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="57.04" y="110.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1789.6" y="212" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1792.61" y="222.5" ></text>
+</g>
+<g >
+<title>vma_alloc_folio_noprof (1 samples, 0.02%)</title><rect x="1785.3" y="132" width="0.4" height="15.0" fill="rgb(246,112,45)" rx="2" ry="2" />
+<text  x="1788.28" y="142.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.02%)</title><rect x="1783.7" y="164" width="0.4" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1786.71" y="174.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2024 (1 samples, 0.02%)</title><rect x="1788.4" y="196" width="0.4" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="1791.43" y="206.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (446 samples, 9.85%)</title><rect x="1509.3" y="52" width="175.3" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="1512.26" y="62.5" >initialize_system@owne..</text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1785.7" y="228" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1788.67" y="238.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (1 samples, 0.02%)</title><rect x="62.7" y="100" width="0.4" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="65.69" y="110.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1685.8" y="84" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1688.80" y="94.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1784.1" y="148" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1787.10" y="158.5" ></text>
+</g>
+<g >
+<title>__alloc_frozen_pages_noprof (1 samples, 0.02%)</title><rect x="1785.3" y="100" width="0.4" height="15.0" fill="rgb(246,151,45)" rx="2" ry="2" />
+<text  x="1788.28" y="110.5" ></text>
+</g>
+<g >
+<title>rcu_pending (1 samples, 0.02%)</title><rect x="1784.1" y="52" width="0.4" height="15.0" fill="rgb(243,169,42)" rx="2" ry="2" />
+<text  x="1787.10" y="62.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1787.2" y="180" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1790.25" y="190.5" ></text>
+</g>
+<g >
+<title>__alloc_frozen_pages_noprof (1 samples, 0.02%)</title><rect x="1784.9" y="132" width="0.4" height="15.0" fill="rgb(246,151,45)" rx="2" ry="2" />
+<text  x="1787.89" y="142.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1684.6" y="84" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1687.62" y="94.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 0.02%)</title><rect x="11.6" y="52" width="0.4" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="14.57" y="62.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (1 samples, 0.02%)</title><rect x="1785.7" y="212" width="0.4" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="1788.67" y="222.5" ></text>
+</g>
+<g >
+<title>rmqueue_pcplist (1 samples, 0.02%)</title><rect x="1785.3" y="52" width="0.4" height="15.0" fill="rgb(232,131,30)" rx="2" ry="2" />
+<text  x="1788.28" y="62.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1484.9" y="196" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1487.88" y="206.5" ></text>
+</g>
+<g >
+<title>alloc_anon_folio (1 samples, 0.02%)</title><rect x="1785.3" y="148" width="0.4" height="15.0" fill="rgb(246,128,45)" rx="2" ry="2" />
+<text  x="1788.28" y="158.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (11 samples, 0.24%)</title><rect x="369.8" y="84" width="4.3" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="372.77" y="94.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1685.4" y="196" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1688.41" y="206.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1781.7" y="164" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1784.74" y="174.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2024 (2 samples, 0.04%)</title><rect x="58.8" y="68" width="0.7" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="61.76" y="78.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (3 samples, 0.07%)</title><rect x="1686.2" y="132" width="1.2" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1689.20" y="142.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="51.7" y="212" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="54.68" y="222.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 0.02%)</title><rect x="1784.5" y="196" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1787.50" y="206.5" ></text>
+</g>
+<g >
+<title>x86_pmu_disable (1 samples, 0.02%)</title><rect x="1789.6" y="84" width="0.4" height="15.0" fill="rgb(241,205,40)" rx="2" ry="2" />
+<text  x="1792.61" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (58 samples, 1.28%)</title><rect x="1486.1" y="68" width="22.8" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1489.06" y="78.5" >e..</text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (1 samples, 0.02%)</title><rect x="51.7" y="180" width="0.4" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="54.68" y="190.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 0.02%)</title><rect x="51.7" y="148" width="0.4" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="54.68" y="158.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (39 samples, 0.86%)</title><rect x="384.3" y="84" width="15.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="387.32" y="94.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1685.8" y="116" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1688.80" y="126.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (2 samples, 0.04%)</title><rect x="10.8" y="148" width="0.8" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="13.79" y="158.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (1 samples, 0.02%)</title><rect x="1783.7" y="276" width="0.4" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="1786.71" y="286.5" ></text>
+</g>
+<g >
+<title>rcu_sched_clock_irq (1 samples, 0.02%)</title><rect x="1784.1" y="68" width="0.4" height="15.0" fill="rgb(239,169,37)" rx="2" ry="2" />
+<text  x="1787.10" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (446 samples, 9.85%)</title><rect x="1509.3" y="68" width="175.3" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1512.26" y="78.5" >ecs_run_system@pito_ec..</text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="52.1" y="132" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="55.07" y="142.5" ></text>
+</g>
+<g >
+<title>__irq_exit_rcu (1 samples, 0.02%)</title><rect x="50.5" y="116" width="0.4" height="15.0" fill="rgb(238,125,36)" rx="2" ry="2" />
+<text  x="53.50" y="126.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1787.2" y="100" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1790.25" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (3 samples, 0.07%)</title><rect x="1686.2" y="116" width="1.2" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1689.20" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1904 (1 samples, 0.02%)</title><rect x="54.0" y="84" width="0.4" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="57.04" y="94.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (1 samples, 0.02%)</title><rect x="1785.3" y="164" width="0.4" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="1788.28" y="174.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (6 samples, 0.13%)</title><rect x="55.6" y="100" width="2.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="58.61" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (719 samples, 15.88%)</title><rect x="522.7" y="52" width="282.7" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="525.73" y="62.5" >ecs_sync_add_remove@pito_ecs.h:3044</text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (81 samples, 1.79%)</title><rect x="261.3" y="84" width="31.8" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="264.25" y="94.5" >ec..</text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.02%)</title><rect x="1687.4" y="100" width="0.4" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1690.38" y="110.5" ></text>
+</g>
+<g >
+<title>acct_account_cputime (1 samples, 0.02%)</title><rect x="51.3" y="52" width="0.4" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="54.29" y="62.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 0.02%)</title><rect x="1685.0" y="68" width="0.4" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="1688.02" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1789.6" y="292" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1792.61" y="302.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 0.02%)</title><rect x="1688.2" y="164" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1691.16" y="174.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (2 samples, 0.04%)</title><rect x="353.7" y="100" width="0.7" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="356.65" y="110.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (117 samples, 2.58%)</title><rect x="205.8" y="116" width="46.0" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="208.81" y="126.5" >run_..</text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1904 (11 samples, 0.24%)</title><rect x="369.8" y="68" width="4.3" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="372.77" y="78.5" ></text>
+</g>
+<g >
+<title>memset@string_fortified.h:59 (1 samples, 0.02%)</title><rect x="1787.6" y="164" width="0.4" height="15.0" fill="rgb(225,144,23)" rx="2" ry="2" />
+<text  x="1790.64" y="174.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1781.7" y="148" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1784.74" y="158.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1787.6" y="132" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1790.64" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3032 (39 samples, 0.86%)</title><rect x="384.3" y="52" width="15.4" height="15.0" fill="rgb(247,199,46)" rx="2" ry="2" />
+<text  x="387.32" y="62.5" ></text>
+</g>
+<g >
+<title>update_process_times (2 samples, 0.04%)</title><rect x="1788.4" y="84" width="0.8" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1791.43" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:1987 (1 samples, 0.02%)</title><rect x="1789.2" y="228" width="0.4" height="15.0" fill="rgb(238,199,37)" rx="2" ry="2" />
+<text  x="1792.21" y="238.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1688.2" y="260" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1691.16" y="270.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1782.1" y="148" width="0.8" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1785.14" y="158.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1508.9" y="84" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1511.86" y="94.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="50.5" y="148" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="53.50" y="158.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (2 samples, 0.04%)</title><rect x="1484.9" y="68" width="0.8" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1487.88" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (1 samples, 0.02%)</title><rect x="1484.9" y="180" width="0.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1487.88" y="190.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (23 samples, 0.51%)</title><rect x="354.4" y="84" width="9.1" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="357.44" y="94.5" ></text>
+</g>
+<g >
+<title>update_wall_time (1 samples, 0.02%)</title><rect x="1789.2" y="100" width="0.4" height="15.0" fill="rgb(236,150,34)" rx="2" ry="2" />
+<text  x="1792.21" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (68 samples, 1.50%)</title><rect x="134.3" y="84" width="26.7" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="137.25" y="94.5" >e..</text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 0.02%)</title><rect x="1784.5" y="228" width="0.4" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="1787.50" y="238.5" ></text>
+</g>
+<g >
+<title>sched_balance_trigger (1 samples, 0.02%)</title><rect x="1687.4" y="68" width="0.4" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="1690.38" y="78.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1783.7" y="196" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1786.71" y="206.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="62.3" y="84" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="65.30" y="94.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1783.7" y="260" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1786.71" y="270.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (1 samples, 0.02%)</title><rect x="1783.7" y="292" width="0.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1786.71" y="302.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (2 samples, 0.04%)</title><rect x="10.0" y="116" width="0.8" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="13.00" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (28 samples, 0.62%)</title><rect x="329.7" y="84" width="11.0" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="332.67" y="94.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="50.9" y="228" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="53.89" y="238.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1687.8" y="116" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1690.77" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (3 samples, 0.07%)</title><rect x="363.5" y="84" width="1.2" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="366.48" y="94.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1782.1" y="164" width="0.8" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1785.14" y="174.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (2 samples, 0.04%)</title><rect x="1788.4" y="100" width="0.8" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1791.43" y="110.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="50.5" y="260" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="53.50" y="270.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (2 samples, 0.04%)</title><rect x="10.0" y="164" width="0.8" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="13.00" y="174.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1788.4" y="148" width="0.8" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1791.43" y="158.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1789.2" y="196" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1792.21" y="206.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (1 samples, 0.02%)</title><rect x="51.3" y="196" width="0.4" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="54.29" y="206.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="63.1" y="196" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="66.08" y="206.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1784.9" y="340" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1787.89" y="350.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1788.0" y="148" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1791.03" y="158.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3071 (267 samples, 5.90%)</title><rect x="805.4" y="52" width="105.0" height="15.0" fill="rgb(239,199,37)" rx="2" ry="2" />
+<text  x="808.44" y="62.5" >ecs_sync_add..</text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (2 samples, 0.04%)</title><rect x="59.5" y="84" width="0.8" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="62.54" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (2 samples, 0.04%)</title><rect x="353.7" y="84" width="0.7" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="356.65" y="94.5" ></text>
+</g>
+<g >
+<title>alloc_pages_mpol (2 samples, 0.04%)</title><rect x="10.0" y="68" width="0.8" height="15.0" fill="rgb(237,128,35)" rx="2" ry="2" />
+<text  x="13.00" y="78.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (1 samples, 0.02%)</title><rect x="1784.9" y="196" width="0.4" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="1787.89" y="206.5" ></text>
+</g>
+<g >
+<title>alloc_anon_folio (2 samples, 0.04%)</title><rect x="10.0" y="100" width="0.8" height="15.0" fill="rgb(246,128,45)" rx="2" ry="2" />
+<text  x="13.00" y="110.5" ></text>
+</g>
+<g >
+<title>alloc_pages_mpol (1 samples, 0.02%)</title><rect x="1784.5" y="100" width="0.4" height="15.0" fill="rgb(237,128,35)" rx="2" ry="2" />
+<text  x="1787.50" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1906 (12 samples, 0.27%)</title><rect x="364.7" y="52" width="4.7" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="367.66" y="62.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 0.02%)</title><rect x="1784.9" y="244" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1787.89" y="254.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (44 samples, 0.97%)</title><rect x="1754.2" y="116" width="17.3" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1757.22" y="126.5" ></text>
+</g>
+<g >
+<title>clockevents_program_event (2 samples, 0.04%)</title><rect x="1782.1" y="100" width="0.8" height="15.0" fill="rgb(241,102,39)" rx="2" ry="2" />
+<text  x="1785.14" y="110.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1789.6" y="196" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1792.61" y="206.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 0.02%)</title><rect x="1785.3" y="228" width="0.4" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="1788.28" y="238.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (1 samples, 0.02%)</title><rect x="1782.1" y="212" width="0.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1785.14" y="222.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (719 samples, 15.88%)</title><rect x="522.7" y="84" width="282.7" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="525.73" y="94.5" >finish@owned_initialize.c:57</text>
+</g>
+<g >
+<title>x86_pmu_disable_all (1 samples, 0.02%)</title><rect x="1789.6" y="52" width="0.4" height="15.0" fill="rgb(230,205,28)" rx="2" ry="2" />
+<text  x="1792.61" y="62.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (58 samples, 1.28%)</title><rect x="1486.1" y="84" width="22.8" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1489.06" y="94.5" >r..</text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (446 samples, 9.85%)</title><rect x="1509.3" y="84" width="175.3" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1512.26" y="94.5" >run_systems@bench_pict..</text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3064 (7 samples, 0.15%)</title><rect x="381.6" y="84" width="2.7" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="384.57" y="94.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1783.7" y="244" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1786.71" y="254.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (1 samples, 0.02%)</title><rect x="63.1" y="68" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="66.08" y="78.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="53.6" y="116" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="56.64" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_bitset_test@pito_ecs.h:2467 (2 samples, 0.04%)</title><rect x="53.3" y="68" width="0.7" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="56.25" y="78.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1784.1" y="116" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1787.10" y="126.5" ></text>
+</g>
+<g >
+<title>vma_alloc_folio_noprof (1 samples, 0.02%)</title><rect x="1784.9" y="164" width="0.4" height="15.0" fill="rgb(246,112,45)" rx="2" ry="2" />
+<text  x="1787.89" y="174.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2001 (1 samples, 0.02%)</title><rect x="369.4" y="68" width="0.4" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="372.38" y="78.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1787.6" y="228" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1790.64" y="238.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1789.2" y="276" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1792.21" y="286.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 0.02%)</title><rect x="1784.5" y="180" width="0.4" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="1787.50" y="190.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="62.7" y="116" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="65.69" y="126.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 0.02%)</title><rect x="1688.2" y="196" width="0.4" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="1691.16" y="206.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:1987 (167 samples, 3.69%)</title><rect x="63.5" y="52" width="65.6" height="15.0" fill="rgb(238,199,37)" rx="2" ry="2" />
+<text  x="66.47" y="62.5" >ecs_add..</text>
+</g>
+<g >
+<title>memset@plt (3 samples, 0.07%)</title><rect x="1686.2" y="52" width="1.2" height="15.0" fill="rgb(231,144,29)" rx="2" ry="2" />
+<text  x="1689.20" y="62.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1687.8" y="180" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1690.77" y="190.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (1 samples, 0.02%)</title><rect x="1788.0" y="228" width="0.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1791.03" y="238.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1785.7" y="116" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1788.67" y="126.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (2 samples, 0.04%)</title><rect x="1782.1" y="132" width="0.8" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1785.14" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (12 samples, 0.27%)</title><rect x="364.7" y="84" width="4.7" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="367.66" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (267 samples, 5.90%)</title><rect x="805.4" y="68" width="105.0" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="808.44" y="78.5" >ecs_sync_own..</text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1782.9" y="180" width="0.8" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1785.92" y="190.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (12 samples, 0.27%)</title><rect x="364.7" y="100" width="4.7" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="367.66" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2035 (1 samples, 0.02%)</title><rect x="1786.1" y="68" width="0.4" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="1789.07" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2035 (627 samples, 13.85%)</title><rect x="1227.7" y="52" width="246.6" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="1230.73" y="62.5" >ecs_sync_owned@pito_ecs.h:2035</text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (1 samples, 0.02%)</title><rect x="52.1" y="116" width="0.4" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="55.07" y="126.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1782.9" y="212" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1785.92" y="222.5" ></text>
+</g>
+<g >
+<title>ecs_bitset_test@pito_ecs.h:2467 (198 samples, 4.37%)</title><rect x="251.8" y="52" width="77.9" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="254.82" y="62.5" >ecs_bits..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 0.02%)</title><rect x="1785.3" y="260" width="0.4" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="1788.28" y="270.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (1 samples, 0.02%)</title><rect x="1786.5" y="68" width="0.4" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="1789.46" y="78.5" ></text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (1 samples, 0.02%)</title><rect x="50.5" y="180" width="0.4" height="15.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="53.50" y="190.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (13 samples, 0.29%)</title><rect x="129.1" y="100" width="5.2" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="132.14" y="110.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (1 samples, 0.02%)</title><rect x="1688.2" y="132" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1691.16" y="142.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="374.1" y="116" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="377.10" y="126.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 0.02%)</title><rect x="63.1" y="84" width="0.4" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="66.08" y="94.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1788.0" y="132" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1791.03" y="142.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="50.9" y="132" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="53.89" y="142.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (1 samples, 0.02%)</title><rect x="1786.9" y="100" width="0.3" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="1789.85" y="110.5" ></text>
+</g>
+<g >
+<title>task_tick_fair (1 samples, 0.02%)</title><rect x="1785.7" y="68" width="0.4" height="15.0" fill="rgb(240,114,39)" rx="2" ry="2" />
+<text  x="1788.67" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (54 samples, 1.19%)</title><rect x="161.0" y="84" width="21.2" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="163.99" y="94.5" ></text>
+</g>
+<g >
+<title>task_tick_fair (1 samples, 0.02%)</title><rect x="1787.2" y="52" width="0.4" height="15.0" fill="rgb(240,114,39)" rx="2" ry="2" />
+<text  x="1790.25" y="62.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.02%)</title><rect x="1785.7" y="84" width="0.4" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1788.67" y="94.5" ></text>
+</g>
+<g >
+<title>vma_alloc_folio_noprof (2 samples, 0.04%)</title><rect x="10.0" y="84" width="0.8" height="15.0" fill="rgb(246,112,45)" rx="2" ry="2" />
+<text  x="13.00" y="94.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1784.1" y="164" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1787.10" y="174.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2024 (240 samples, 5.30%)</title><rect x="910.4" y="52" width="94.4" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="913.42" y="62.5" >ecs_sync_ow..</text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (81 samples, 1.79%)</title><rect x="261.3" y="100" width="31.8" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="264.25" y="110.5" >fi..</text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1786.5" y="100" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1789.46" y="110.5" ></text>
+</g>
+<g >
+<title>rmqueue_pcplist (1 samples, 0.02%)</title><rect x="1784.9" y="84" width="0.4" height="15.0" fill="rgb(232,131,30)" rx="2" ry="2" />
+<text  x="1787.89" y="94.5" ></text>
+</g>
+<g >
+<title>alloc_pages_mpol (1 samples, 0.02%)</title><rect x="1785.3" y="116" width="0.4" height="15.0" fill="rgb(237,128,35)" rx="2" ry="2" />
+<text  x="1788.28" y="126.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (23 samples, 0.51%)</title><rect x="354.4" y="100" width="9.1" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="357.44" y="110.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (7 samples, 0.15%)</title><rect x="381.6" y="116" width="2.7" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="384.57" y="126.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (564 samples, 12.46%)</title><rect x="1006.0" y="68" width="221.7" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1008.97" y="78.5" >finish@owned_initialize.c:57</text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1787.6" y="100" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1790.64" y="110.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (2 samples, 0.04%)</title><rect x="10.0" y="180" width="0.8" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="13.00" y="190.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="50.9" y="148" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="53.89" y="158.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1783.7" y="228" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1786.71" y="238.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1788.0" y="244" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1791.03" y="254.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2595 (1 samples, 0.02%)</title><rect x="1685.4" y="164" width="0.4" height="15.0" fill="rgb(244,199,42)" rx="2" ry="2" />
+<text  x="1688.41" y="174.5" ></text>
+</g>
+<g >
+<title>amd_pmu_disable_all (1 samples, 0.02%)</title><rect x="1789.6" y="68" width="0.4" height="15.0" fill="rgb(230,110,28)" rx="2" ry="2" />
+<text  x="1792.61" y="78.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (2 samples, 0.04%)</title><rect x="10.0" y="196" width="0.8" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="13.00" y="206.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1785.7" y="132" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1788.67" y="142.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1789.6" y="180" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1792.61" y="190.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (2 samples, 0.04%)</title><rect x="10.8" y="228" width="0.8" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="13.79" y="238.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1687.8" y="244" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1690.77" y="254.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1788.0" y="164" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1791.03" y="174.5" ></text>
+</g>
+<g >
+<title>tick_do_update_jiffies64 (1 samples, 0.02%)</title><rect x="50.9" y="84" width="0.4" height="15.0" fill="rgb(235,142,33)" rx="2" ry="2" />
+<text  x="53.89" y="94.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (12 samples, 0.27%)</title><rect x="376.5" y="84" width="4.7" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="379.46" y="94.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (1 samples, 0.02%)</title><rect x="1784.9" y="308" width="0.4" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="1787.89" y="318.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1484.9" y="148" width="0.8" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1487.88" y="158.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (44 samples, 0.97%)</title><rect x="1754.2" y="84" width="17.3" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="1757.22" y="94.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="50.9" y="164" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="53.89" y="174.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1782.9" y="148" width="0.8" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1785.92" y="158.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (1 samples, 0.02%)</title><rect x="63.1" y="164" width="0.4" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="66.08" y="174.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="11.6" y="148" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="14.57" y="158.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2011 (54 samples, 1.19%)</title><rect x="161.0" y="52" width="21.2" height="15.0" fill="rgb(233,199,31)" rx="2" ry="2" />
+<text  x="163.99" y="62.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (1 samples, 0.02%)</title><rect x="1788.0" y="212" width="0.4" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="1791.03" y="222.5" ></text>
+</g>
+<g >
+<title>perf_adjust_freq_unthr_context (1 samples, 0.02%)</title><rect x="1687.8" y="52" width="0.4" height="15.0" fill="rgb(230,184,27)" rx="2" ry="2" />
+<text  x="1690.77" y="62.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 0.02%)</title><rect x="11.6" y="100" width="0.4" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="14.57" y="110.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (26 samples, 0.57%)</title><rect x="1771.5" y="116" width="10.2" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1774.52" y="126.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="54.0" y="132" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="57.04" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2035 (1 samples, 0.02%)</title><rect x="1685.8" y="132" width="0.4" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="1688.80" y="142.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1484.9" y="132" width="0.8" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1487.88" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (1 samples, 0.02%)</title><rect x="1687.8" y="212" width="0.4" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="1690.77" y="222.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (2 samples, 0.04%)</title><rect x="10.8" y="244" width="0.8" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="13.79" y="254.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="381.2" y="116" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="384.18" y="126.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (1 samples, 0.02%)</title><rect x="1784.1" y="212" width="0.4" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="1787.10" y="222.5" ></text>
+</g>
+<g >
+<title>ktime_get (1 samples, 0.02%)</title><rect x="1685.4" y="52" width="0.4" height="15.0" fill="rgb(237,114,35)" rx="2" ry="2" />
+<text  x="1688.41" y="62.5" ></text>
+</g>
+<g >
+<title>ecs_create_owned@pito_ecs.h:1635 (1 samples, 0.02%)</title><rect x="1789.6" y="260" width="0.4" height="15.0" fill="rgb(237,199,36)" rx="2" ry="2" />
+<text  x="1792.61" y="270.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 0.02%)</title><rect x="1688.2" y="180" width="0.4" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="1691.16" y="190.5" ></text>
+</g>
+<g >
+<title>update_vsyscall (1 samples, 0.02%)</title><rect x="1789.2" y="52" width="0.4" height="15.0" fill="rgb(230,150,28)" rx="2" ry="2" />
+<text  x="1792.21" y="62.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2033 (1 samples, 0.02%)</title><rect x="1782.9" y="196" width="0.4" height="15.0" fill="rgb(245,199,44)" rx="2" ry="2" />
+<text  x="1785.92" y="206.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1685.4" y="116" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1688.41" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (6 samples, 0.13%)</title><rect x="55.6" y="68" width="2.4" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="58.61" y="78.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="52.9" y="132" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="55.86" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="63.1" y="180" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="66.08" y="190.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1906 (1 samples, 0.02%)</title><rect x="52.9" y="84" width="0.4" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="55.86" y="94.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="50.9" y="100" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="53.89" y="110.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (5 samples, 0.11%)</title><rect x="374.5" y="116" width="2.0" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="377.49" y="126.5" ></text>
+</g>
+<g >
+<title>timekeeping_update_from_shadow (1 samples, 0.02%)</title><rect x="1788.0" y="52" width="0.4" height="15.0" fill="rgb(235,148,33)" rx="2" ry="2" />
+<text  x="1791.03" y="62.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="51.3" y="116" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="54.29" y="126.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.02%)</title><rect x="1785.7" y="100" width="0.4" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1788.67" y="110.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 0.02%)</title><rect x="1784.9" y="260" width="0.4" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="1787.89" y="270.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2035 (1 samples, 0.02%)</title><rect x="1687.4" y="212" width="0.4" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="1690.38" y="222.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1687.4" y="132" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1690.38" y="142.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:22 (2 samples, 0.04%)</title><rect x="353.7" y="68" width="0.7" height="15.0" fill="rgb(241,161,40)" rx="2" ry="2" />
+<text  x="356.65" y="78.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1784.5" y="292" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1787.50" y="302.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (1 samples, 0.02%)</title><rect x="374.1" y="84" width="0.4" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="377.10" y="94.5" ></text>
+</g>
+<g >
+<title>memset@string_fortified.h:59 (3 samples, 0.07%)</title><rect x="1686.2" y="68" width="1.2" height="15.0" fill="rgb(225,144,23)" rx="2" ry="2" />
+<text  x="1689.20" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (1 samples, 0.02%)</title><rect x="53.3" y="84" width="0.3" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="56.25" y="94.5" ></text>
+</g>
+<g >
+<title>update_wall_time (1 samples, 0.02%)</title><rect x="50.9" y="68" width="0.4" height="15.0" fill="rgb(236,150,34)" rx="2" ry="2" />
+<text  x="53.89" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3071 (2 samples, 0.04%)</title><rect x="58.0" y="68" width="0.8" height="15.0" fill="rgb(239,199,37)" rx="2" ry="2" />
+<text  x="60.97" y="78.5" ></text>
+</g>
+<g >
+<title>alloc_anon_folio (1 samples, 0.02%)</title><rect x="51.7" y="52" width="0.4" height="15.0" fill="rgb(246,128,45)" rx="2" ry="2" />
+<text  x="54.68" y="62.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.02%)</title><rect x="1485.7" y="68" width="0.4" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1488.67" y="78.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1785.3" y="308" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1788.28" y="318.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="50.5" y="164" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="53.50" y="174.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (28 samples, 0.62%)</title><rect x="52.1" y="52" width="11.0" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="55.07" y="62.5" ></text>
+</g>
+<g >
+<title>__alloc_frozen_pages_noprof (2 samples, 0.04%)</title><rect x="10.0" y="52" width="0.8" height="15.0" fill="rgb(246,151,45)" rx="2" ry="2" />
+<text  x="13.00" y="62.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (39 samples, 0.86%)</title><rect x="384.3" y="68" width="15.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="387.32" y="78.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (2 samples, 0.04%)</title><rect x="10.8" y="212" width="0.8" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="13.79" y="222.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (1 samples, 0.02%)</title><rect x="51.7" y="68" width="0.4" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="54.68" y="78.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (118 samples, 2.61%)</title><rect x="1688.6" y="52" width="46.4" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1691.56" y="62.5" >pthr..</text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1782.5" y="212" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1785.53" y="222.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="52.5" y="116" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="55.47" y="126.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.02%)</title><rect x="1787.2" y="68" width="0.4" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1790.25" y="78.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (1 samples, 0.02%)</title><rect x="50.5" y="228" width="0.4" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="53.50" y="238.5" ></text>
+</g>
+<g >
+<title>get_page_from_freelist (1 samples, 0.02%)</title><rect x="1784.9" y="116" width="0.4" height="15.0" fill="rgb(232,170,30)" rx="2" ry="2" />
+<text  x="1787.89" y="126.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (54 samples, 1.19%)</title><rect x="161.0" y="100" width="21.2" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="163.99" y="110.5" ></text>
+</g>
+<g >
+<title>account_process_tick (1 samples, 0.02%)</title><rect x="51.3" y="68" width="0.4" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="54.29" y="78.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (49 samples, 1.08%)</title><rect x="1735.0" y="84" width="19.2" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="1737.95" y="94.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 0.02%)</title><rect x="1785.3" y="196" width="0.4" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="1788.28" y="206.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3045 (81 samples, 1.79%)</title><rect x="261.3" y="68" width="31.8" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="264.25" y="78.5" >ec..</text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (11 samples, 0.24%)</title><rect x="369.8" y="100" width="4.3" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="372.77" y="110.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1687.8" y="196" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1690.77" y="206.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1789.2" y="180" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1792.21" y="190.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (2 samples, 0.04%)</title><rect x="1484.9" y="100" width="0.8" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1487.88" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1508.9" y="68" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1511.86" y="78.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (1 samples, 0.02%)</title><rect x="51.7" y="84" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="54.68" y="94.5" ></text>
+</g>
+<g >
+<title>memset@string_fortified.h:59 (1 samples, 0.02%)</title><rect x="50.5" y="196" width="0.4" height="15.0" fill="rgb(225,144,23)" rx="2" ry="2" />
+<text  x="53.50" y="206.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1787.2" y="132" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1790.25" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (2 samples, 0.04%)</title><rect x="10.0" y="244" width="0.8" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="13.00" y="254.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1485.3" y="196" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1488.27" y="206.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (1 samples, 0.02%)</title><rect x="1785.3" y="180" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1788.28" y="190.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (60 samples, 1.33%)</title><rect x="182.2" y="84" width="23.6" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="185.22" y="94.5" >e..</text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1904 (1 samples, 0.02%)</title><rect x="381.2" y="68" width="0.4" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="384.18" y="78.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1785.7" y="196" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1788.67" y="206.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (27 samples, 0.60%)</title><rect x="1474.3" y="68" width="10.6" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1477.26" y="78.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1787.6" y="116" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1790.64" y="126.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="53.3" y="116" width="0.3" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="56.25" y="126.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (68 samples, 1.50%)</title><rect x="134.3" y="100" width="26.7" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="137.25" y="110.5" >r..</text>
+</g>
+<g >
+<title>nohz_balancer_kick (1 samples, 0.02%)</title><rect x="1687.4" y="52" width="0.4" height="15.0" fill="rgb(236,199,34)" rx="2" ry="2" />
+<text  x="1690.38" y="62.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1783.7" y="308" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1786.71" y="318.5" ></text>
+</g>
+<g >
+<title>irqentry_exit (1 samples, 0.02%)</title><rect x="1685.0" y="52" width="0.4" height="15.0" fill="rgb(237,153,36)" rx="2" ry="2" />
+<text  x="1688.02" y="62.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (13 samples, 0.29%)</title><rect x="129.1" y="84" width="5.2" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="132.14" y="94.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:15 (1 samples, 0.02%)</title><rect x="1508.9" y="52" width="0.4" height="15.0" fill="rgb(237,161,35)" rx="2" ry="2" />
+<text  x="1511.86" y="62.5" ></text>
+</g>
+<g >
+<title>update_cfs_group (2 samples, 0.04%)</title><rect x="1788.4" y="52" width="0.8" height="15.0" fill="rgb(241,150,40)" rx="2" ry="2" />
+<text  x="1791.43" y="62.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 0.02%)</title><rect x="51.7" y="116" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="54.68" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="381.2" y="100" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="384.18" y="110.5" ></text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (1 samples, 0.02%)</title><rect x="52.1" y="68" width="0.4" height="15.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="55.07" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (44 samples, 0.97%)</title><rect x="1754.2" y="100" width="17.3" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1757.22" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (12 samples, 0.27%)</title><rect x="376.5" y="100" width="4.7" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="379.46" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1685.0" y="116" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1688.02" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:1999 (117 samples, 2.58%)</title><rect x="205.8" y="68" width="46.0" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="208.81" y="78.5" >ecs_..</text>
+</g>
+<g >
+<title>sched_clock (1 samples, 0.02%)</title><rect x="1783.7" y="100" width="0.4" height="15.0" fill="rgb(240,164,39)" rx="2" ry="2" />
+<text  x="1786.71" y="110.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1781.7" y="180" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1784.74" y="190.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (5 samples, 0.11%)</title><rect x="374.5" y="84" width="2.0" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="377.49" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1906 (44 samples, 0.97%)</title><rect x="1754.2" y="68" width="17.3" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="1757.22" y="78.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1687.4" y="164" width="0.4" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1690.38" y="174.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (240 samples, 5.30%)</title><rect x="910.4" y="68" width="94.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="913.42" y="78.5" >finish@owne..</text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (1 samples, 0.02%)</title><rect x="1789.2" y="244" width="0.4" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="1792.21" y="254.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 0.02%)</title><rect x="51.7" y="164" width="0.4" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="54.68" y="174.5" ></text>
+</g>
+<g >
+<title>alloc_pages_mpol (1 samples, 0.02%)</title><rect x="1784.9" y="148" width="0.4" height="15.0" fill="rgb(237,128,35)" rx="2" ry="2" />
+<text  x="1787.89" y="158.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (2 samples, 0.04%)</title><rect x="10.8" y="196" width="0.8" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="13.79" y="206.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (26 samples, 0.57%)</title><rect x="1771.5" y="84" width="10.2" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="1774.52" y="94.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (24 samples, 0.53%)</title><rect x="251.8" y="100" width="9.5" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="254.82" y="110.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1687.4" y="116" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1690.38" y="126.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1685.4" y="132" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1688.41" y="142.5" ></text>
+</g>
+<g >
+<title>perf_event_task_tick (1 samples, 0.02%)</title><rect x="1789.6" y="116" width="0.4" height="15.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="1792.61" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_bitset_flip@pito_ecs.h:2460 (117 samples, 2.58%)</title><rect x="205.8" y="52" width="46.0" height="15.0" fill="rgb(227,199,24)" rx="2" ry="2" />
+<text  x="208.81" y="62.5" >ecs_..</text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1784.1" y="228" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1787.10" y="238.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1781.7" y="196" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1784.74" y="206.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3038 (313 samples, 6.91%)</title><rect x="399.7" y="52" width="123.0" height="15.0" fill="rgb(236,199,35)" rx="2" ry="2" />
+<text  x="402.66" y="62.5" >ecs_sync_add_re..</text>
+</g>
+<g >
+<title>tick_program_event (2 samples, 0.04%)</title><rect x="1782.1" y="116" width="0.8" height="15.0" fill="rgb(241,142,39)" rx="2" ry="2" />
+<text  x="1785.14" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2008 (1 samples, 0.02%)</title><rect x="50.5" y="212" width="0.4" height="15.0" fill="rgb(240,199,38)" rx="2" ry="2" />
+<text  x="53.50" y="222.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (2 samples, 0.04%)</title><rect x="1788.4" y="132" width="0.8" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1791.43" y="142.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1789.2" y="132" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1792.21" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2035 (1 samples, 0.02%)</title><rect x="1782.5" y="196" width="0.4" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="1785.53" y="206.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="52.5" y="132" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="55.47" y="142.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (1 samples, 0.02%)</title><rect x="1784.5" y="260" width="0.4" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="1787.50" y="270.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (26 samples, 0.57%)</title><rect x="1771.5" y="100" width="10.2" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1774.52" y="110.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.02%)</title><rect x="1687.8" y="100" width="0.4" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1690.77" y="110.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (98 samples, 2.16%)</title><rect x="12.0" y="100" width="38.5" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="14.97" y="110.5" >ini..</text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2035 (4 samples, 0.09%)</title><rect x="60.3" y="68" width="1.6" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="63.33" y="78.5" ></text>
+</g>
+<g >
+<title>policy_nodemask (1 samples, 0.02%)</title><rect x="1688.2" y="52" width="0.4" height="15.0" fill="rgb(236,208,34)" rx="2" ry="2" />
+<text  x="1691.16" y="62.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1687.4" y="196" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1690.38" y="206.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (2 samples, 0.04%)</title><rect x="1782.9" y="116" width="0.8" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1785.92" y="126.5" ></text>
+</g>
+<g >
+<title>memset@string_fortified.h:59 (1 samples, 0.02%)</title><rect x="52.1" y="84" width="0.4" height="15.0" fill="rgb(225,144,23)" rx="2" ry="2" />
+<text  x="55.07" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (1 samples, 0.02%)</title><rect x="1782.1" y="196" width="0.4" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="1785.14" y="206.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1485.7" y="164" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1488.67" y="174.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="51.3" y="164" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="54.29" y="174.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (27 samples, 0.60%)</title><rect x="1474.3" y="52" width="10.6" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1477.26" y="62.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2005 (68 samples, 1.50%)</title><rect x="134.3" y="52" width="26.7" height="15.0" fill="rgb(245,199,44)" rx="2" ry="2" />
+<text  x="137.25" y="62.5" >e..</text>
+</g>
+<g >
+<title>__handle_mm_fault (2 samples, 0.04%)</title><rect x="10.8" y="132" width="0.8" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="13.79" y="142.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (117 samples, 2.58%)</title><rect x="205.8" y="84" width="46.0" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="208.81" y="94.5" >init..</text>
+</g>
+<g >
+<title>ecs_create_owned@pito_ecs.h:1639 (23 samples, 0.51%)</title><rect x="354.4" y="52" width="9.1" height="15.0" fill="rgb(230,199,28)" rx="2" ry="2" />
+<text  x="357.44" y="62.5" ></text>
+</g>
+<g >
+<title>ktime_get_update_offsets_now (1 samples, 0.02%)</title><rect x="1685.8" y="52" width="0.4" height="15.0" fill="rgb(236,114,35)" rx="2" ry="2" />
+<text  x="1688.80" y="62.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (1 samples, 0.02%)</title><rect x="1787.2" y="196" width="0.4" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="1790.25" y="206.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1789.2" y="148" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1792.21" y="158.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="61.9" y="100" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="64.90" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1485.3" y="180" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1488.27" y="190.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2001 (1 samples, 0.02%)</title><rect x="374.1" y="68" width="0.4" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="377.10" y="78.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (2 samples, 0.04%)</title><rect x="10.0" y="148" width="0.8" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="13.00" y="158.5" ></text>
+</g>
+<g >
+<title>ecs_sparse_set_remove@pito_ecs.h:2945 (7 samples, 0.15%)</title><rect x="381.6" y="68" width="2.7" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="384.57" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2008 (1 samples, 0.02%)</title><rect x="52.1" y="100" width="0.4" height="15.0" fill="rgb(240,199,38)" rx="2" ry="2" />
+<text  x="55.07" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (1 samples, 0.02%)</title><rect x="50.9" y="212" width="0.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="53.89" y="222.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 0.02%)</title><rect x="1688.2" y="148" width="0.4" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="1691.16" y="158.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1787.6" y="84" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1790.64" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2031 (1 samples, 0.02%)</title><rect x="1685.4" y="180" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1688.41" y="190.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.02%)</title><rect x="1784.1" y="84" width="0.4" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1787.10" y="94.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1685.0" y="132" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1688.02" y="142.5" ></text>
+</g>
+<g >
+<title>update_wall_time (1 samples, 0.02%)</title><rect x="1788.0" y="84" width="0.4" height="15.0" fill="rgb(236,150,34)" rx="2" ry="2" />
+<text  x="1791.03" y="94.5" ></text>
+</g>
+<g >
+<title>rmqueue.isra.0 (1 samples, 0.02%)</title><rect x="1785.3" y="68" width="0.4" height="15.0" fill="rgb(238,131,36)" rx="2" ry="2" />
+<text  x="1788.28" y="78.5" ></text>
+</g>
+<g >
+<title>ktime_get (4 samples, 0.09%)</title><rect x="1782.1" y="84" width="1.6" height="15.0" fill="rgb(237,114,35)" rx="2" ry="2" />
+<text  x="1785.14" y="94.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1485.7" y="212" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1488.67" y="222.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1899 (118 samples, 2.61%)</title><rect x="1688.6" y="68" width="46.4" height="15.0" fill="rgb(235,199,33)" rx="2" ry="2" />
+<text  x="1691.56" y="78.5" >ecs_..</text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="50.5" y="244" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="53.50" y="254.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (68 samples, 1.50%)</title><rect x="134.3" y="68" width="26.7" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="137.25" y="78.5" >i..</text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (5 samples, 0.11%)</title><rect x="374.5" y="100" width="2.0" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="377.49" y="110.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.02%)</title><rect x="1783.7" y="148" width="0.4" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1786.71" y="158.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 0.02%)</title><rect x="11.6" y="68" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="14.57" y="78.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 0.02%)</title><rect x="1784.5" y="244" width="0.4" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="1787.50" y="254.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (2 samples, 0.04%)</title><rect x="10.0" y="132" width="0.8" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="13.00" y="142.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 0.02%)</title><rect x="1784.5" y="212" width="0.4" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="1787.50" y="222.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1789.6" y="244" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1792.61" y="254.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1783.7" y="180" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1786.71" y="190.5" ></text>
+</g>
+<g >
+<title>tick_do_update_jiffies64 (1 samples, 0.02%)</title><rect x="1781.7" y="116" width="0.4" height="15.0" fill="rgb(235,142,33)" rx="2" ry="2" />
+<text  x="1784.74" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (313 samples, 6.91%)</title><rect x="399.7" y="68" width="123.0" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="402.66" y="78.5" >ecs_sync_owned@..</text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (1 samples, 0.02%)</title><rect x="52.9" y="100" width="0.4" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="55.86" y="110.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (1 samples, 0.02%)</title><rect x="62.3" y="68" width="0.4" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="65.30" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (2 samples, 0.04%)</title><rect x="58.0" y="84" width="0.8" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="60.97" y="94.5" ></text>
+</g>
+<g >
+<title>perf_adjust_freq_unthr_context (1 samples, 0.02%)</title><rect x="1789.6" y="100" width="0.4" height="15.0" fill="rgb(230,184,27)" rx="2" ry="2" />
+<text  x="1792.61" y="110.5" ></text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (98 samples, 2.16%)</title><rect x="12.0" y="52" width="38.5" height="15.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="14.97" y="62.5" >__m..</text>
+</g>
+<g >
+<title>rmqueue.isra.0 (1 samples, 0.02%)</title><rect x="1784.9" y="100" width="0.4" height="15.0" fill="rgb(238,131,36)" rx="2" ry="2" />
+<text  x="1787.89" y="110.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (3 samples, 0.07%)</title><rect x="363.5" y="100" width="1.2" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="366.48" y="110.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1782.1" y="228" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1785.14" y="238.5" ></text>
+</g>
+<g >
+<title>handle_softirqs (1 samples, 0.02%)</title><rect x="50.5" y="100" width="0.4" height="15.0" fill="rgb(238,146,37)" rx="2" ry="2" />
+<text  x="53.50" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="374.1" y="100" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="377.10" y="110.5" ></text>
+</g>
+<g >
+<title>__folio_batch_add_and_move (2 samples, 0.04%)</title><rect x="10.8" y="52" width="0.8" height="15.0" fill="rgb(242,135,41)" rx="2" ry="2" />
+<text  x="13.79" y="62.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (2 samples, 0.04%)</title><rect x="10.8" y="100" width="0.8" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="13.79" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (167 samples, 3.69%)</title><rect x="63.5" y="84" width="65.6" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="66.47" y="94.5" >ecs_run..</text>
+</g>
+<g >
+<title>exc_page_fault (2 samples, 0.04%)</title><rect x="10.8" y="180" width="0.8" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="13.79" y="190.5" ></text>
+</g>
+<g >
+<title>__sched_balance_update_blocked_averages (1 samples, 0.02%)</title><rect x="50.5" y="52" width="0.4" height="15.0" fill="rgb(239,132,37)" rx="2" ry="2" />
+<text  x="53.50" y="62.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (118 samples, 2.61%)</title><rect x="1688.6" y="100" width="46.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1691.56" y="110.5" >ecs_..</text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1906 (26 samples, 0.57%)</title><rect x="1771.5" y="68" width="10.2" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="1774.52" y="78.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.02%)</title><rect x="1787.2" y="84" width="0.4" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1790.25" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (3 samples, 0.07%)</title><rect x="54.4" y="84" width="1.2" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="57.43" y="94.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1784.1" y="100" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1787.10" y="110.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (1 samples, 0.02%)</title><rect x="52.5" y="100" width="0.4" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="55.47" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1887 (1 samples, 0.02%)</title><rect x="54.0" y="68" width="0.4" height="15.0" fill="rgb(239,199,38)" rx="2" ry="2" />
+<text  x="57.04" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (1 samples, 0.02%)</title><rect x="1484.9" y="164" width="0.4" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="1487.88" y="174.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="51.3" y="100" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="54.29" y="110.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1788.0" y="180" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1791.03" y="190.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (118 samples, 2.61%)</title><rect x="1688.6" y="116" width="46.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1691.56" y="126.5" >run_..</text>
+</g>
+<g >
+<title>alloc_anon_folio (1 samples, 0.02%)</title><rect x="1784.9" y="180" width="0.4" height="15.0" fill="rgb(246,128,45)" rx="2" ry="2" />
+<text  x="1787.89" y="190.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1788.4" y="212" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1791.43" y="222.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (1 samples, 0.02%)</title><rect x="62.7" y="68" width="0.4" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="65.69" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (1 samples, 0.02%)</title><rect x="51.3" y="212" width="0.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="54.29" y="222.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (44 samples, 0.97%)</title><rect x="1754.2" y="52" width="17.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1757.22" y="62.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 0.02%)</title><rect x="1688.2" y="212" width="0.4" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="1691.16" y="222.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (12 samples, 0.27%)</title><rect x="376.5" y="116" width="4.7" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="379.46" y="126.5" ></text>
+</g>
+<g >
+<title>sched_balance_update_blocked_averages (1 samples, 0.02%)</title><rect x="50.5" y="68" width="0.4" height="15.0" fill="rgb(239,164,37)" rx="2" ry="2" />
+<text  x="53.50" y="78.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (1 samples, 0.02%)</title><rect x="1784.5" y="148" width="0.4" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="1787.50" y="158.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (1 samples, 0.02%)</title><rect x="1787.2" y="212" width="0.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1790.25" y="222.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="62.3" y="100" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="65.30" y="110.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1789.6" y="164" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1792.61" y="174.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 0.02%)</title><rect x="1785.3" y="244" width="0.4" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="1788.28" y="254.5" ></text>
+</g>
+<g >
+<title>alloc_anon_folio (1 samples, 0.02%)</title><rect x="1688.2" y="100" width="0.4" height="15.0" fill="rgb(246,128,45)" rx="2" ry="2" />
+<text  x="1691.16" y="110.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (3 samples, 0.07%)</title><rect x="54.4" y="100" width="1.2" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="57.43" y="110.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1687.4" y="148" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1690.38" y="158.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1485.7" y="84" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1488.67" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2015 (1 samples, 0.02%)</title><rect x="52.9" y="68" width="0.4" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="55.86" y="78.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (2 samples, 0.04%)</title><rect x="58.8" y="84" width="0.7" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="61.76" y="94.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 0.02%)</title><rect x="11.6" y="116" width="0.4" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="14.57" y="126.5" ></text>
+</g>
+<g >
+<title>__timekeeping_advance (1 samples, 0.02%)</title><rect x="1781.7" y="84" width="0.4" height="15.0" fill="rgb(251,128,51)" rx="2" ry="2" />
+<text  x="1784.74" y="94.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (93 samples, 2.05%)</title><rect x="293.1" y="84" width="36.6" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="296.10" y="94.5" >fin..</text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (3 samples, 0.07%)</title><rect x="363.5" y="68" width="1.2" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="366.48" y="78.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (167 samples, 3.69%)</title><rect x="63.5" y="68" width="65.6" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="66.47" y="78.5" >initial..</text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1785.7" y="244" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1788.67" y="254.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (49 samples, 1.08%)</title><rect x="1735.0" y="116" width="19.2" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1737.95" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1784.9" y="324" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1787.89" y="334.5" ></text>
+</g>
+<g >
+<title>ecs_create_owned@pito_ecs.h:1635 (2 samples, 0.04%)</title><rect x="353.7" y="52" width="0.7" height="15.0" fill="rgb(237,199,36)" rx="2" ry="2" />
+<text  x="356.65" y="62.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1685.4" y="148" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1688.41" y="158.5" ></text>
+</g>
+<g >
+<title>tick_do_update_jiffies64 (1 samples, 0.02%)</title><rect x="1788.0" y="100" width="0.4" height="15.0" fill="rgb(235,142,33)" rx="2" ry="2" />
+<text  x="1791.03" y="110.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1485.7" y="116" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1488.67" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2033 (564 samples, 12.46%)</title><rect x="1006.0" y="52" width="221.7" height="15.0" fill="rgb(245,199,44)" rx="2" ry="2" />
+<text  x="1008.97" y="62.5" >ecs_sync_owned@pito_ecs.h:2033</text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2031 (33 samples, 0.73%)</title><rect x="340.7" y="68" width="13.0" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="343.68" y="78.5" ></text>
+</g>
+<g >
+<title>sched_clock_cpu (1 samples, 0.02%)</title><rect x="1785.7" y="52" width="0.4" height="15.0" fill="rgb(238,164,36)" rx="2" ry="2" />
+<text  x="1788.67" y="62.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.02%)</title><rect x="1685.8" y="68" width="0.4" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1688.80" y="78.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (4 samples, 0.09%)</title><rect x="60.3" y="84" width="1.6" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="63.33" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="61.9" y="84" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="64.90" y="94.5" ></text>
+</g>
+<g >
+<title>timekeeping_update_from_shadow (1 samples, 0.02%)</title><rect x="1789.2" y="68" width="0.4" height="15.0" fill="rgb(235,148,33)" rx="2" ry="2" />
+<text  x="1792.21" y="78.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (26 samples, 0.57%)</title><rect x="1771.5" y="52" width="10.2" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1774.52" y="62.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (60 samples, 1.33%)</title><rect x="182.2" y="100" width="23.6" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="185.22" y="110.5" >r..</text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (2 samples, 0.04%)</title><rect x="58.0" y="100" width="0.8" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="60.97" y="110.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1781.7" y="244" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1784.74" y="254.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (24 samples, 0.53%)</title><rect x="251.8" y="68" width="9.5" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="254.82" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="52.9" y="116" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="55.86" y="126.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1783.3" y="212" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1786.32" y="222.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1784.1" y="244" width="0.4" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1787.10" y="254.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3038 (3 samples, 0.07%)</title><rect x="54.4" y="68" width="1.2" height="15.0" fill="rgb(236,199,35)" rx="2" ry="2" />
+<text  x="57.43" y="78.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.02%)</title><rect x="51.3" y="84" width="0.4" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="54.29" y="94.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 0.02%)</title><rect x="51.7" y="100" width="0.4" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="54.68" y="110.5" ></text>
+</g>
+<g >
+<title>task_tick_fair (1 samples, 0.02%)</title><rect x="1783.7" y="132" width="0.4" height="15.0" fill="rgb(240,114,39)" rx="2" ry="2" />
+<text  x="1786.71" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (1 samples, 0.02%)</title><rect x="50.9" y="196" width="0.4" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="53.89" y="206.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (1 samples, 0.02%)</title><rect x="1687.8" y="228" width="0.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1690.77" y="238.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2033 (1 samples, 0.02%)</title><rect x="1788.8" y="196" width="0.4" height="15.0" fill="rgb(245,199,44)" rx="2" ry="2" />
+<text  x="1791.82" y="206.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (13 samples, 0.29%)</title><rect x="129.1" y="68" width="5.2" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="132.14" y="78.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:22 (1 samples, 0.02%)</title><rect x="1789.6" y="276" width="0.4" height="15.0" fill="rgb(241,161,40)" rx="2" ry="2" />
+<text  x="1792.61" y="286.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (1 samples, 0.02%)</title><rect x="1685.0" y="100" width="0.4" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="1688.02" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1906 (1 samples, 0.02%)</title><rect x="52.5" y="84" width="0.4" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="55.47" y="94.5" ></text>
+</g>
+<g >
+<title>alloc_pages_mpol (1 samples, 0.02%)</title><rect x="1688.2" y="68" width="0.4" height="15.0" fill="rgb(237,128,35)" rx="2" ry="2" />
+<text  x="1691.16" y="78.5" ></text>
+</g>
+<g >
+<title>rmqueue.isra.0 (1 samples, 0.02%)</title><rect x="1784.5" y="52" width="0.4" height="15.0" fill="rgb(238,131,36)" rx="2" ry="2" />
+<text  x="1787.50" y="62.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (1 samples, 0.02%)</title><rect x="369.4" y="84" width="0.4" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="372.38" y="94.5" ></text>
+</g>
+<g >
+<title>folio_add_lru_vma (2 samples, 0.04%)</title><rect x="10.8" y="84" width="0.8" height="15.0" fill="rgb(224,208,21)" rx="2" ry="2" />
+<text  x="13.79" y="94.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="50.9" y="116" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="53.89" y="126.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.02%)</title><rect x="1787.6" y="68" width="0.4" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1790.64" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (6 samples, 0.13%)</title><rect x="55.6" y="84" width="2.4" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="58.61" y="94.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="50.9" y="180" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="53.89" y="190.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1785.3" y="292" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1788.28" y="302.5" ></text>
+</g>
+<g >
+<title>folio_add_lru (2 samples, 0.04%)</title><rect x="10.8" y="68" width="0.8" height="15.0" fill="rgb(238,208,36)" rx="2" ry="2" />
+<text  x="13.79" y="78.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (11 samples, 0.24%)</title><rect x="369.8" y="116" width="4.3" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="372.77" y="126.5" ></text>
+</g>
+<g >
+<title>kvm_clock_get_cycles (5 samples, 0.11%)</title><rect x="1781.7" y="68" width="2.0" height="15.0" fill="rgb(244,130,43)" rx="2" ry="2" />
+<text  x="1784.74" y="78.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (313 samples, 6.91%)</title><rect x="399.7" y="84" width="123.0" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="402.66" y="94.5" >finish@owned_in..</text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (1 samples, 0.02%)</title><rect x="1787.6" y="196" width="0.4" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="1790.64" y="206.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (1 samples, 0.02%)</title><rect x="1684.6" y="52" width="0.4" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="1687.62" y="62.5" ></text>
+</g>
+<g >
+<title>hrtimer_run_queues (2 samples, 0.04%)</title><rect x="1484.9" y="52" width="0.8" height="15.0" fill="rgb(237,152,36)" rx="2" ry="2" />
+<text  x="1487.88" y="62.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (1 samples, 0.02%)</title><rect x="1784.9" y="212" width="0.4" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1787.89" y="222.5" ></text>
+</g>
+<g >
+<title>sync_regs (3 samples, 0.07%)</title><rect x="1786.1" y="52" width="1.1" height="15.0" fill="rgb(238,183,36)" rx="2" ry="2" />
+<text  x="1789.07" y="62.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (117 samples, 2.58%)</title><rect x="205.8" y="100" width="46.0" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="208.81" y="110.5" >ecs_..</text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 0.02%)</title><rect x="1685.0" y="84" width="0.4" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="1688.02" y="94.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1787.2" y="228" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1790.25" y="238.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (98 samples, 2.16%)</title><rect x="12.0" y="116" width="38.5" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="14.97" y="126.5" >ecs..</text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1789.6" y="228" width="0.4" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1792.61" y="238.5" ></text>
+</g>
+<g >
+<title>vma_alloc_folio_noprof (1 samples, 0.02%)</title><rect x="1784.5" y="116" width="0.4" height="15.0" fill="rgb(246,112,45)" rx="2" ry="2" />
+<text  x="1787.50" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2033 (1 samples, 0.02%)</title><rect x="1781.7" y="228" width="0.4" height="15.0" fill="rgb(245,199,44)" rx="2" ry="2" />
+<text  x="1784.74" y="238.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (2 samples, 0.04%)</title><rect x="1484.9" y="116" width="0.8" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1487.88" y="126.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2033 (2 samples, 0.04%)</title><rect x="59.5" y="68" width="0.8" height="15.0" fill="rgb(245,199,44)" rx="2" ry="2" />
+<text  x="62.54" y="78.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 0.02%)</title><rect x="1784.9" y="228" width="0.4" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="1787.89" y="238.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:1999 (13 samples, 0.29%)</title><rect x="129.1" y="52" width="5.2" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="132.14" y="62.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (2 samples, 0.04%)</title><rect x="10.0" y="212" width="0.8" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="13.00" y="222.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1787.6" y="212" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1790.64" y="222.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.02%)</title><rect x="1781.7" y="132" width="0.4" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1784.74" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (49 samples, 1.08%)</title><rect x="1735.0" y="100" width="19.2" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1737.95" y="110.5" ></text>
+</g>
+<g >
+<title>update_wall_time (1 samples, 0.02%)</title><rect x="1781.7" y="100" width="0.4" height="15.0" fill="rgb(236,150,34)" rx="2" ry="2" />
+<text  x="1784.74" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (7 samples, 0.15%)</title><rect x="381.6" y="100" width="2.7" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="384.57" y="110.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3045 (1 samples, 0.02%)</title><rect x="53.6" y="84" width="0.4" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="56.64" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1904 (5 samples, 0.11%)</title><rect x="374.5" y="68" width="2.0" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="377.49" y="78.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.02%)</title><rect x="1789.6" y="132" width="0.4" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1792.61" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2026 (3 samples, 0.07%)</title><rect x="1004.8" y="52" width="1.2" height="15.0" fill="rgb(241,199,40)" rx="2" ry="2" />
+<text  x="1007.79" y="62.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:23 (3 samples, 0.07%)</title><rect x="1686.2" y="100" width="1.2" height="15.0" fill="rgb(239,161,38)" rx="2" ry="2" />
+<text  x="1689.20" y="110.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (1 samples, 0.02%)</title><rect x="1786.9" y="132" width="0.3" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="1789.85" y="142.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1 samples, 0.02%)</title><rect x="1784.5" y="276" width="0.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1787.50" y="286.5" ></text>
+</g>
+<g >
+<title>ecs_add_owned@pito_ecs.h:2008 (1 samples, 0.02%)</title><rect x="1787.6" y="180" width="0.4" height="15.0" fill="rgb(240,199,38)" rx="2" ry="2" />
+<text  x="1790.64" y="190.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (12 samples, 0.27%)</title><rect x="364.7" y="68" width="4.7" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="367.66" y="78.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:27 (118 samples, 2.61%)</title><rect x="1688.6" y="84" width="46.4" height="15.0" fill="rgb(232,161,30)" rx="2" ry="2" />
+<text  x="1691.56" y="94.5" >init..</text>
+</g>
+<g >
+<title>ecs_sync_owned@pito_ecs.h:2037 (1 samples, 0.02%)</title><rect x="53.3" y="100" width="0.3" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="56.25" y="110.5" ></text>
+</g>
+<g >
+<title>initialize_system@owned_initialize.c:24 (2 samples, 0.04%)</title><rect x="10.0" y="228" width="0.8" height="15.0" fill="rgb(237,161,36)" rx="2" ry="2" />
+<text  x="13.00" y="238.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (2 samples, 0.04%)</title><rect x="10.8" y="116" width="0.8" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="13.79" y="126.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (2 samples, 0.04%)</title><rect x="1782.9" y="132" width="0.8" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1785.92" y="142.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (2 samples, 0.04%)</title><rect x="1484.9" y="84" width="0.8" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1487.88" y="94.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (33 samples, 0.73%)</title><rect x="340.7" y="84" width="13.0" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="343.68" y="94.5" ></text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1887 (12 samples, 0.27%)</title><rect x="369.4" y="52" width="4.7" height="15.0" fill="rgb(239,199,38)" rx="2" ry="2" />
+<text  x="372.38" y="62.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.02%)</title><rect x="1784.1" y="180" width="0.4" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1787.10" y="190.5" ></text>
+</g>
+<g >
+<title>__timekeeping_advance (1 samples, 0.02%)</title><rect x="1788.0" y="68" width="0.4" height="15.0" fill="rgb(251,128,51)" rx="2" ry="2" />
+<text  x="1791.03" y="78.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (1 samples, 0.02%)</title><rect x="1485.7" y="180" width="0.4" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="1488.67" y="190.5" ></text>
+</g>
+<g >
+<title>finish@owned_initialize.c:57 (1 samples, 0.02%)</title><rect x="1788.8" y="212" width="0.4" height="15.0" fill="rgb(229,177,26)" rx="2" ry="2" />
+<text  x="1791.82" y="222.5" ></text>
+</g>
+</g>
+</svg>

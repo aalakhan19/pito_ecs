@@ -1,0 +1,2114 @@
+<?xml version="1.0" standalone="no"?>
+<!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd">
+<svg version="1.1" width="1800" height="422" onload="init(evt)" viewBox="0 0 1800 422" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<!-- Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples. -->
+<!-- NOTES:  -->
+<defs>
+	<linearGradient id="background" y1="0" y2="1" x1="0" x2="0" >
+		<stop stop-color="#eeeeee" offset="5%" />
+		<stop stop-color="#eeeeb0" offset="95%" />
+	</linearGradient>
+</defs>
+<style type="text/css">
+	text { font-family:Verdana; font-size:12px; fill:rgb(0,0,0); }
+	#search, #ignorecase { opacity:0.1; cursor:pointer; }
+	#search:hover, #search.show, #ignorecase:hover, #ignorecase.show { opacity:1; }
+	#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+	#title { text-anchor:middle; font-size:17px}
+	#unzoom { cursor:pointer; }
+	#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+	.hide { display:none; }
+	.parent { opacity:0.5; }
+</style>
+<script type="text/ecmascript">
+<![CDATA[
+	"use strict";
+	var details, searchbtn, unzoombtn, matchedtxt, svg, searching, currentSearchTerm, ignorecase, ignorecaseBtn;
+	function init(evt) {
+		details = document.getElementById("details").firstChild;
+		searchbtn = document.getElementById("search");
+		ignorecaseBtn = document.getElementById("ignorecase");
+		unzoombtn = document.getElementById("unzoom");
+		matchedtxt = document.getElementById("matched");
+		svg = document.getElementsByTagName("svg")[0];
+		searching = 0;
+		currentSearchTerm = null;
+
+		// use GET parameters to restore a flamegraphs state.
+		var params = get_params();
+		if (params.x && params.y)
+			zoom(find_group(document.querySelector('[x="' + params.x + '"][y="' + params.y + '"]')));
+                if (params.s) search(params.s);
+	}
+
+	// event listeners
+	window.addEventListener("click", function(e) {
+		var target = find_group(e.target);
+		if (target) {
+			if (target.nodeName == "a") {
+				if (e.ctrlKey === false) return;
+				e.preventDefault();
+			}
+			if (target.classList.contains("parent")) unzoom(true);
+			zoom(target);
+			if (!document.querySelector('.parent')) {
+				// we have basically done a clearzoom so clear the url
+				var params = get_params();
+				if (params.x) delete params.x;
+				if (params.y) delete params.y;
+				history.replaceState(null, null, parse_params(params));
+				unzoombtn.classList.add("hide");
+				return;
+			}
+
+			// set parameters for zoom state
+			var el = target.querySelector("rect");
+			if (el && el.attributes && el.attributes.y && el.attributes._orig_x) {
+				var params = get_params()
+				params.x = el.attributes._orig_x.value;
+				params.y = el.attributes.y.value;
+				history.replaceState(null, null, parse_params(params));
+			}
+		}
+		else if (e.target.id == "unzoom") clearzoom();
+		else if (e.target.id == "search") search_prompt();
+		else if (e.target.id == "ignorecase") toggle_ignorecase();
+	}, false)
+
+	// mouse-over for info
+	// show
+	window.addEventListener("mouseover", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = "Function: " + g_to_text(target);
+	}, false)
+
+	// clear
+	window.addEventListener("mouseout", function(e) {
+		var target = find_group(e.target);
+		if (target) details.nodeValue = ' ';
+	}, false)
+
+	// ctrl-F for search
+	// ctrl-I to toggle case-sensitive search
+	window.addEventListener("keydown",function (e) {
+		if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+			e.preventDefault();
+			search_prompt();
+		}
+		else if (e.ctrlKey && e.keyCode === 73) {
+			e.preventDefault();
+			toggle_ignorecase();
+		}
+	}, false)
+
+	// functions
+	function get_params() {
+		var params = {};
+		var paramsarr = window.location.search.substr(1).split('&');
+		for (var i = 0; i < paramsarr.length; ++i) {
+			var tmp = paramsarr[i].split("=");
+			if (!tmp[0] || !tmp[1]) continue;
+			params[tmp[0]]  = decodeURIComponent(tmp[1]);
+		}
+		return params;
+	}
+	function parse_params(params) {
+		var uri = "?";
+		for (var key in params) {
+			uri += key + '=' + encodeURIComponent(params[key]) + '&';
+		}
+		if (uri.slice(-1) == "&")
+			uri = uri.substring(0, uri.length - 1);
+		if (uri == '?')
+			uri = window.location.href.split('?')[0];
+		return uri;
+	}
+	function find_child(node, selector) {
+		var children = node.querySelectorAll(selector);
+		if (children.length) return children[0];
+	}
+	function find_group(node) {
+		var parent = node.parentElement;
+		if (!parent) return;
+		if (parent.id == "frames") return node;
+		return find_group(parent);
+	}
+	function orig_save(e, attr, val) {
+		if (e.attributes["_orig_" + attr] != undefined) return;
+		if (e.attributes[attr] == undefined) return;
+		if (val == undefined) val = e.attributes[attr].value;
+		e.setAttribute("_orig_" + attr, val);
+	}
+	function orig_load(e, attr) {
+		if (e.attributes["_orig_"+attr] == undefined) return;
+		e.attributes[attr].value = e.attributes["_orig_" + attr].value;
+		e.removeAttribute("_orig_"+attr);
+	}
+	function g_to_text(e) {
+		var text = find_child(e, "title").firstChild.nodeValue;
+		return (text)
+	}
+	function g_to_func(e) {
+		var func = g_to_text(e);
+		// if there's any manipulation we want to do to the function
+		// name before it's searched, do it here before returning.
+		return (func);
+	}
+	function update_text(e) {
+		var r = find_child(e, "rect");
+		var t = find_child(e, "text");
+		var w = parseFloat(r.attributes.width.value) -3;
+		var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+		t.attributes.x.value = parseFloat(r.attributes.x.value) + 3;
+
+		// Smaller than this size won't fit anything
+		if (w < 2 * 12 * 0.59) {
+			t.textContent = "";
+			return;
+		}
+
+		t.textContent = txt;
+		var sl = t.getSubStringLength(0, txt.length);
+		// check if only whitespace or if we can fit the entire string into width w
+		if (/^ *$/.test(txt) || sl < w)
+			return;
+
+		// this isn't perfect, but gives a good starting point
+		// and avoids calling getSubStringLength too often
+		var start = Math.floor((w/sl) * txt.length);
+		for (var x = start; x > 0; x = x-2) {
+			if (t.getSubStringLength(0, x + 2) <= w) {
+				t.textContent = txt.substring(0, x) + "..";
+				return;
+			}
+		}
+		t.textContent = "";
+	}
+
+	// zoom
+	function zoom_reset(e) {
+		if (e.attributes != undefined) {
+			orig_load(e, "x");
+			orig_load(e, "width");
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_reset(c[i]);
+		}
+	}
+	function zoom_child(e, x, ratio) {
+		if (e.attributes != undefined) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = (parseFloat(e.attributes.x.value) - x - 10) * ratio + 10;
+				if (e.tagName == "text")
+					e.attributes.x.value = find_child(e.parentNode, "rect[x]").attributes.x.value + 3;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseFloat(e.attributes.width.value) * ratio;
+			}
+		}
+
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_child(c[i], x - 10, ratio);
+		}
+	}
+	function zoom_parent(e) {
+		if (e.attributes) {
+			if (e.attributes.x != undefined) {
+				orig_save(e, "x");
+				e.attributes.x.value = 10;
+			}
+			if (e.attributes.width != undefined) {
+				orig_save(e, "width");
+				e.attributes.width.value = parseInt(svg.width.baseVal.value) - (10 * 2);
+			}
+		}
+		if (e.childNodes == undefined) return;
+		for (var i = 0, c = e.childNodes; i < c.length; i++) {
+			zoom_parent(c[i]);
+		}
+	}
+	function zoom(node) {
+		var attr = find_child(node, "rect").attributes;
+		var width = parseFloat(attr.width.value);
+		var xmin = parseFloat(attr.x.value);
+		var xmax = parseFloat(xmin + width);
+		var ymin = parseFloat(attr.y.value);
+		var ratio = (svg.width.baseVal.value - 2 * 10) / width;
+
+		// XXX: Workaround for JavaScript float issues (fix me)
+		var fudge = 0.0001;
+
+		unzoombtn.classList.remove("hide");
+
+		var el = document.getElementById("frames").children;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var a = find_child(e, "rect").attributes;
+			var ex = parseFloat(a.x.value);
+			var ew = parseFloat(a.width.value);
+			var upstack;
+			// Is it an ancestor
+			if (0 == 0) {
+				upstack = parseFloat(a.y.value) > ymin;
+			} else {
+				upstack = parseFloat(a.y.value) < ymin;
+			}
+			if (upstack) {
+				// Direct ancestor
+				if (ex <= xmin && (ex+ew+fudge) >= xmax) {
+					e.classList.add("parent");
+					zoom_parent(e);
+					update_text(e);
+				}
+				// not in current path
+				else
+					e.classList.add("hide");
+			}
+			// Children maybe
+			else {
+				// no common path
+				if (ex < xmin || ex + fudge >= xmax) {
+					e.classList.add("hide");
+				}
+				else {
+					zoom_child(e, xmin, ratio);
+					update_text(e);
+				}
+			}
+		}
+		search();
+	}
+	function unzoom(dont_update_text) {
+		unzoombtn.classList.add("hide");
+		var el = document.getElementById("frames").children;
+		for(var i = 0; i < el.length; i++) {
+			el[i].classList.remove("parent");
+			el[i].classList.remove("hide");
+			zoom_reset(el[i]);
+			if(!dont_update_text) update_text(el[i]);
+		}
+		search();
+	}
+	function clearzoom() {
+		unzoom();
+
+		// remove zoom state
+		var params = get_params();
+		if (params.x) delete params.x;
+		if (params.y) delete params.y;
+		history.replaceState(null, null, parse_params(params));
+	}
+
+	// search
+	function toggle_ignorecase() {
+		ignorecase = !ignorecase;
+		if (ignorecase) {
+			ignorecaseBtn.classList.add("show");
+		} else {
+			ignorecaseBtn.classList.remove("show");
+		}
+		reset_search();
+		search();
+	}
+	function reset_search() {
+		var el = document.querySelectorAll("#frames rect");
+		for (var i = 0; i < el.length; i++) {
+			orig_load(el[i], "fill")
+		}
+		var params = get_params();
+		delete params.s;
+		history.replaceState(null, null, parse_params(params));
+	}
+	function search_prompt() {
+		if (!searching) {
+			var term = prompt("Enter a search term (regexp " +
+			    "allowed, eg: ^ext4_)"
+			    + (ignorecase ? ", ignoring case" : "")
+			    + "\nPress Ctrl-i to toggle case sensitivity", "");
+			if (term != null) search(term);
+		} else {
+			reset_search();
+			searching = 0;
+			currentSearchTerm = null;
+			searchbtn.classList.remove("show");
+			searchbtn.firstChild.nodeValue = "Search"
+			matchedtxt.classList.add("hide");
+			matchedtxt.firstChild.nodeValue = ""
+		}
+	}
+	function search(term) {
+		if (term) currentSearchTerm = term;
+		if (currentSearchTerm === null) return;
+
+		var re = new RegExp(currentSearchTerm, ignorecase ? 'i' : '');
+		var el = document.getElementById("frames").children;
+		var matches = new Object();
+		var maxwidth = 0;
+		for (var i = 0; i < el.length; i++) {
+			var e = el[i];
+			var func = g_to_func(e);
+			var rect = find_child(e, "rect");
+			if (func == null || rect == null)
+				continue;
+
+			// Save max width. Only works as we have a root frame
+			var w = parseFloat(rect.attributes.width.value);
+			if (w > maxwidth)
+				maxwidth = w;
+
+			if (func.match(re)) {
+				// highlight
+				var x = parseFloat(rect.attributes.x.value);
+				orig_save(rect, "fill");
+				rect.attributes.fill.value = "rgb(230,0,230)";
+
+				// remember matches
+				if (matches[x] == undefined) {
+					matches[x] = w;
+				} else {
+					if (w > matches[x]) {
+						// overwrite with parent
+						matches[x] = w;
+					}
+				}
+				searching = 1;
+			}
+		}
+		if (!searching)
+			return;
+		var params = get_params();
+		params.s = currentSearchTerm;
+		history.replaceState(null, null, parse_params(params));
+
+		searchbtn.classList.add("show");
+		searchbtn.firstChild.nodeValue = "Reset Search";
+
+		// calculate percent matched, excluding vertical overlap
+		var count = 0;
+		var lastx = -1;
+		var lastw = 0;
+		var keys = Array();
+		for (k in matches) {
+			if (matches.hasOwnProperty(k))
+				keys.push(k);
+		}
+		// sort the matched frames by their x location
+		// ascending, then width descending
+		keys.sort(function(a, b){
+			return a - b;
+		});
+		// Step through frames saving only the biggest bottom-up frames
+		// thanks to the sort order. This relies on the tree property
+		// where children are always smaller than their parents.
+		var fudge = 0.0001;	// JavaScript floating point
+		for (var k in keys) {
+			var x = parseFloat(keys[k]);
+			var w = matches[keys[k]];
+			if (x >= lastx + lastw - fudge) {
+				count += w;
+				lastx = x;
+				lastw = w;
+			}
+		}
+		// display matched percent
+		matchedtxt.classList.remove("hide");
+		var pct = 100 * count / maxwidth;
+		if (pct != 100) pct = pct.toFixed(1)
+		matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+	}
+]]>
+</script>
+<rect x="0.0" y="0" width="1800.0" height="422.0" fill="url(#background)"  />
+<text id="title" x="900.00" y="24" >mixed_pito_v0_t1_w0</text>
+<text id="details" x="10.00" y="405" > </text>
+<text id="unzoom" x="10.00" y="24" class="hide">Reset Zoom</text>
+<text id="search" x="1690.00" y="24" >Search</text>
+<text id="ignorecase" x="1774.00" y="24" >ic</text>
+<text id="matched" x="1690.00" y="405" > </text>
+<g id="frames">
+<g >
+<title>pthread_mutex_lock (14 samples, 0.46%)</title><rect x="1469.6" y="293" width="8.2" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1472.63" y="303.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.03%)</title><rect x="1030.9" y="229" width="0.6" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1033.87" y="239.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.03%)</title><rect x="1030.9" y="197" width="0.6" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1033.87" y="207.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (1 samples, 0.03%)</title><rect x="1288.0" y="165" width="0.6" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="1290.98" y="175.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (2 samples, 0.07%)</title><rect x="1281.0" y="213" width="1.2" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="1284.01" y="223.5" ></text>
+</g>
+<g >
+<title>ecs_arena_grow@pito_ecs.h:2748 (13 samples, 0.42%)</title><rect x="1292.0" y="261" width="7.6" height="15.0" fill="rgb(230,199,28)" rx="2" ry="2" />
+<text  x="1295.04" y="271.5" ></text>
+</g>
+<g >
+<title>x86_pmu_disable (1 samples, 0.03%)</title><rect x="1047.7" y="117" width="0.6" height="15.0" fill="rgb(241,205,40)" rx="2" ry="2" />
+<text  x="1050.70" y="127.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (2 samples, 0.07%)</title><rect x="362.9" y="197" width="1.1" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="365.87" y="207.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1923 (122 samples, 3.98%)</title><rect x="1514.3" y="309" width="70.8" height="15.0" fill="rgb(240,199,38)" rx="2" ry="2" />
+<text  x="1517.32" y="319.5" >ecs_add@..</text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1806 (1 samples, 0.03%)</title><rect x="1443.5" y="309" width="0.6" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1446.52" y="319.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.03%)</title><rect x="363.4" y="165" width="0.6" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="366.45" y="175.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1779 (122 samples, 3.98%)</title><rect x="1347.2" y="309" width="70.8" height="15.0" fill="rgb(237,199,36)" rx="2" ry="2" />
+<text  x="1350.18" y="319.5" >ecs_set@..</text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1030.9" y="277" width="0.6" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1033.87" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1806 (3 samples, 0.10%)</title><rect x="1304.2" y="309" width="1.8" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1307.23" y="319.5" ></text>
+</g>
+<g >
+<title>update_system@owned_mixed.c:27 (264 samples, 8.61%)</title><rect x="835.9" y="325" width="153.2" height="15.0" fill="rgb(232,150,30)" rx="2" ry="2" />
+<text  x="838.87" y="335.5" >update_system@owned..</text>
+</g>
+<g >
+<title>ecs_arena_alloc_align@pito_ecs.h:2777 (1 samples, 0.03%)</title><rect x="1291.5" y="277" width="0.5" height="15.0" fill="rgb(241,199,40)" rx="2" ry="2" />
+<text  x="1294.46" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (23 samples, 0.75%)</title><rect x="1004.2" y="293" width="13.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1007.18" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1888 (15 samples, 0.49%)</title><rect x="400.0" y="293" width="8.7" height="15.0" fill="rgb(237,199,36)" rx="2" ry="2" />
+<text  x="403.01" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (19 samples, 0.62%)</title><rect x="1585.1" y="277" width="11.1" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1588.13" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_bitset_test@pito_ecs.h:2467 (6 samples, 0.20%)</title><rect x="1213.1" y="261" width="3.5" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1216.11" y="271.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1778.4" y="277" width="0.6" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1781.39" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (1 samples, 0.03%)</title><rect x="1000.1" y="293" width="0.6" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1003.11" y="303.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.03%)</title><rect x="1556.7" y="181" width="0.6" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1559.69" y="191.5" ></text>
+</g>
+<g >
+<title>ecs_id_array_size@pito_ecs.h:3276 (2 samples, 0.07%)</title><rect x="1018.7" y="293" width="1.1" height="15.0" fill="rgb(246,199,45)" rx="2" ry="2" />
+<text  x="1021.69" y="303.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (2 samples, 0.07%)</title><rect x="362.9" y="213" width="1.1" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="365.87" y="223.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (2 samples, 0.07%)</title><rect x="395.9" y="277" width="1.2" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="398.95" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1890 (255 samples, 8.31%)</title><rect x="408.7" y="293" width="148.0" height="15.0" fill="rgb(233,199,31)" rx="2" ry="2" />
+<text  x="411.72" y="303.5" >ecs_get_raw@pito_e..</text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1768 (9 samples, 0.29%)</title><rect x="1068.6" y="309" width="5.2" height="15.0" fill="rgb(228,199,26)" rx="2" ry="2" />
+<text  x="1071.60" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2269 (549 samples, 17.90%)</title><rect x="989.1" y="341" width="318.6" height="15.0" fill="rgb(230,199,27)" rx="2" ry="2" />
+<text  x="992.09" y="351.5" >ecs_run_system@pito_ecs.h:2269</text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1789 (1 samples, 0.03%)</title><rect x="1290.3" y="309" width="0.6" height="15.0" fill="rgb(236,199,35)" rx="2" ry="2" />
+<text  x="1293.30" y="319.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (1 samples, 0.03%)</title><rect x="1298.4" y="117" width="0.6" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1301.43" y="127.5" ></text>
+</g>
+<g >
+<title>write_system@owned_mixed.c:13 (123 samples, 4.01%)</title><rect x="993.7" y="325" width="71.4" height="15.0" fill="rgb(240,108,39)" rx="2" ry="2" />
+<text  x="996.73" y="335.5" >write_sy..</text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1047.7" y="277" width="0.6" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1050.70" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (3 samples, 0.10%)</title><rect x="1306.0" y="309" width="1.7" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1308.97" y="319.5" ></text>
+</g>
+<g >
+<title>_int_malloc (4 samples, 0.13%)</title><rect x="1293.2" y="213" width="2.3" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="1296.20" y="223.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1877 (7 samples, 0.23%)</title><rect x="1118.5" y="293" width="4.1" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="1121.51" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1906 (15 samples, 0.49%)</title><rect x="1660.0" y="293" width="8.7" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="1663.00" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1798 (31 samples, 1.01%)</title><rect x="1419.1" y="309" width="18.0" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="1422.14" y="319.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (1 samples, 0.03%)</title><rect x="1428.4" y="277" width="0.6" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1431.43" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1967 (27 samples, 0.88%)</title><rect x="1653.0" y="309" width="15.7" height="15.0" fill="rgb(229,199,26)" rx="2" ry="2" />
+<text  x="1656.03" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2665 (29 samples, 0.95%)</title><rect x="1122.6" y="277" width="16.8" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="1125.57" y="287.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1030.9" y="261" width="0.6" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1033.87" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_is_ready@pito_ecs.h:1760 (2 samples, 0.07%)</title><rect x="1329.8" y="309" width="1.1" height="15.0" fill="rgb(225,199,22)" rx="2" ry="2" />
+<text  x="1332.77" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_sparse_set_find@pito_ecs.h:2928 (1 samples, 0.03%)</title><rect x="1758.1" y="261" width="0.6" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1761.08" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1917 (19 samples, 0.62%)</title><rect x="1154.5" y="293" width="11.0" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="1157.49" y="303.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.03%)</title><rect x="1556.7" y="213" width="0.6" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1559.69" y="223.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2666 (3 samples, 0.10%)</title><rect x="1208.5" y="261" width="1.7" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1211.47" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (19 samples, 0.62%)</title><rect x="1503.3" y="293" width="11.0" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1506.30" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3038 (8 samples, 0.26%)</title><rect x="1699.5" y="293" width="4.6" height="15.0" fill="rgb(236,199,35)" rx="2" ry="2" />
+<text  x="1702.46" y="303.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="988.5" y="277" width="0.6" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="991.51" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1874 (12 samples, 0.39%)</title><rect x="1102.3" y="293" width="6.9" height="15.0" fill="rgb(245,199,45)" rx="2" ry="2" />
+<text  x="1105.26" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_arena_reset@pito_ecs.h:2810 (2 samples, 0.07%)</title><rect x="1788.8" y="325" width="1.2" height="15.0" fill="rgb(229,199,27)" rx="2" ry="2" />
+<text  x="1791.84" y="335.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (14 samples, 0.46%)</title><rect x="1257.2" y="277" width="8.1" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1260.22" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (1 samples, 0.03%)</title><rect x="1253.2" y="261" width="0.5" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1256.16" y="271.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (2 samples, 0.07%)</title><rect x="1787.1" y="293" width="1.2" height="15.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="1790.10" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_bitset_flip@pito_ecs.h:2457 (5 samples, 0.16%)</title><rect x="1478.3" y="293" width="2.9" height="15.0" fill="rgb(233,199,31)" rx="2" ry="2" />
+<text  x="1481.34" y="303.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.03%)</title><rect x="834.1" y="197" width="0.6" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="837.13" y="207.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1881 (40 samples, 1.30%)</title><rect x="1557.9" y="293" width="23.2" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1560.85" y="303.5" >e..</text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1881 (45 samples, 1.47%)</title><rect x="1391.9" y="293" width="26.1" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1394.87" y="303.5" >e..</text>
+</g>
+<g >
+<title>pthread_mutex_lock (24 samples, 0.78%)</title><rect x="1216.6" y="261" width="13.9" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1219.59" y="271.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.03%)</title><rect x="834.1" y="165" width="0.6" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="837.13" y="175.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (11 samples, 0.36%)</title><rect x="1488.2" y="293" width="6.4" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1491.21" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (3 samples, 0.10%)</title><rect x="1387.2" y="277" width="1.8" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1390.22" y="287.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 0.03%)</title><rect x="1298.4" y="165" width="0.6" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="1301.43" y="175.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="834.1" y="245" width="0.6" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="837.13" y="255.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="138.3" y="261" width="0.5" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="141.26" y="271.5" ></text>
+</g>
+<g >
+<title>__memset_avx2_unaligned_erms (3 samples, 0.10%)</title><rect x="1671.0" y="277" width="1.8" height="15.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="1674.02" y="287.5" ></text>
+</g>
+<g >
+<title>alloc_anon_folio (1 samples, 0.03%)</title><rect x="1281.6" y="133" width="0.6" height="15.0" fill="rgb(246,128,45)" rx="2" ry="2" />
+<text  x="1284.59" y="143.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (15 samples, 0.49%)</title><rect x="1600.8" y="277" width="8.7" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1603.80" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2665 (32 samples, 1.04%)</title><rect x="1557.9" y="277" width="18.5" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="1560.85" y="287.5" ></text>
+</g>
+<g >
+<title>tmigr_handle_remote (1 samples, 0.03%)</title><rect x="1335.6" y="181" width="0.5" height="15.0" fill="rgb(244,102,43)" rx="2" ry="2" />
+<text  x="1338.57" y="191.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (2 samples, 0.07%)</title><rect x="1698.3" y="261" width="1.2" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1701.30" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (4 samples, 0.13%)</title><rect x="1210.8" y="245" width="2.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1213.79" y="255.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (5 samples, 0.16%)</title><rect x="1408.1" y="261" width="2.9" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1411.12" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1788 (10 samples, 0.33%)</title><rect x="1284.5" y="309" width="5.8" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1287.50" y="319.5" ></text>
+</g>
+<g >
+<title>malloc (2 samples, 0.07%)</title><rect x="1295.5" y="229" width="1.2" height="15.0" fill="rgb(238,112,36)" rx="2" ry="2" />
+<text  x="1298.52" y="239.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1976 (7 samples, 0.23%)</title><rect x="1672.8" y="309" width="4.0" height="15.0" fill="rgb(241,199,40)" rx="2" ry="2" />
+<text  x="1675.76" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1877 (5 samples, 0.16%)</title><rect x="1191.6" y="277" width="2.9" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="1194.64" y="287.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.03%)</title><rect x="1556.7" y="165" width="0.6" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1559.69" y="175.5" ></text>
+</g>
+<g >
+<title>memcpy@string_fortified.h:29 (8 samples, 0.26%)</title><rect x="1299.6" y="293" width="4.6" height="15.0" fill="rgb(229,144,26)" rx="2" ry="2" />
+<text  x="1302.59" y="303.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (2 samples, 0.07%)</title><rect x="1288.0" y="245" width="1.1" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="1290.98" y="255.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (11 samples, 0.36%)</title><rect x="1660.6" y="277" width="6.4" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1663.58" y="287.5" ></text>
+</g>
+<g >
+<title>update_system@owned_mixed.c:26 (1,376 samples, 44.86%)</title><rect x="37.3" y="325" width="798.6" height="15.0" fill="rgb(234,150,32)" rx="2" ry="2" />
+<text  x="40.28" y="335.5" >update_system@owned_mixed.c:26</text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1874 (14 samples, 0.46%)</title><rect x="1539.3" y="293" width="8.1" height="15.0" fill="rgb(245,199,45)" rx="2" ry="2" />
+<text  x="1542.28" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (31 samples, 1.01%)</title><rect x="1612.4" y="293" width="18.0" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1615.41" y="303.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.03%)</title><rect x="988.5" y="245" width="0.6" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="991.51" y="255.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1873 (37 samples, 1.21%)</title><rect x="1517.8" y="293" width="21.5" height="15.0" fill="rgb(247,199,46)" rx="2" ry="2" />
+<text  x="1520.81" y="303.5" >e..</text>
+</g>
+<g >
+<title>x86_pmu_disable (1 samples, 0.03%)</title><rect x="834.1" y="117" width="0.6" height="15.0" fill="rgb(241,205,40)" rx="2" ry="2" />
+<text  x="837.13" y="127.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (2 samples, 0.07%)</title><rect x="1288.0" y="181" width="1.1" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1290.98" y="191.5" ></text>
+</g>
+<g >
+<title>ecs_cmd_flush_queue@pito_ecs.h:2411 (22 samples, 0.72%)</title><rect x="1323.4" y="325" width="12.7" height="15.0" fill="rgb(231,199,28)" rx="2" ry="2" />
+<text  x="1326.38" y="335.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (1 samples, 0.03%)</title><rect x="1446.4" y="309" width="0.6" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1449.42" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2280 (5 samples, 0.16%)</title><rect x="1787.1" y="341" width="2.9" height="15.0" fill="rgb(238,199,36)" rx="2" ry="2" />
+<text  x="1790.10" y="351.5" ></text>
+</g>
+<g >
+<title>ecs_is_ready@pito_ecs.h:1762 (9 samples, 0.29%)</title><rect x="1460.9" y="309" width="5.3" height="15.0" fill="rgb(239,199,37)" rx="2" ry="2" />
+<text  x="1463.93" y="319.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 0.03%)</title><rect x="1281.6" y="181" width="0.6" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="1284.59" y="191.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1941 (32 samples, 1.04%)</title><rect x="1634.5" y="309" width="18.5" height="15.0" fill="rgb(224,199,21)" rx="2" ry="2" />
+<text  x="1637.46" y="319.5" ></text>
+</g>
+<g >
+<title>folios_put_refs (1 samples, 0.03%)</title><rect x="1288.0" y="85" width="0.6" height="15.0" fill="rgb(239,208,37)" rx="2" ry="2" />
+<text  x="1290.98" y="95.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (19 samples, 0.62%)</title><rect x="1195.1" y="245" width="11.0" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1198.12" y="255.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.03%)</title><rect x="1047.7" y="165" width="0.6" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1050.70" y="175.5" ></text>
+</g>
+<g >
+<title>perf_event_task_tick (1 samples, 0.03%)</title><rect x="1047.7" y="149" width="0.6" height="15.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="1050.70" y="159.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1947 (5 samples, 0.16%)</title><rect x="1279.3" y="293" width="2.9" height="15.0" fill="rgb(231,199,28)" rx="2" ry="2" />
+<text  x="1282.27" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_clear@pito_ecs.h:2692 (5 samples, 0.16%)</title><rect x="1478.3" y="309" width="2.9" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="1481.34" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2667 (8 samples, 0.26%)</title><rect x="1576.4" y="277" width="4.7" height="15.0" fill="rgb(231,199,28)" rx="2" ry="2" />
+<text  x="1579.42" y="287.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1375.6" y="261" width="0.6" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1378.61" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1874 (11 samples, 0.36%)</title><rect x="1365.2" y="293" width="6.4" height="15.0" fill="rgb(245,199,45)" rx="2" ry="2" />
+<text  x="1368.17" y="303.5" ></text>
+</g>
+<g >
+<title>_raw_spin_unlock_irq (1 samples, 0.03%)</title><rect x="1335.6" y="149" width="0.5" height="15.0" fill="rgb(239,166,37)" rx="2" ry="2" />
+<text  x="1338.57" y="159.5" ></text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1887 (1 samples, 0.03%)</title><rect x="1429.0" y="277" width="0.6" height="15.0" fill="rgb(239,199,38)" rx="2" ry="2" />
+<text  x="1432.01" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_create@pito_ecs.h:1628 (9 samples, 0.29%)</title><rect x="1059.9" y="309" width="5.2" height="15.0" fill="rgb(233,199,31)" rx="2" ry="2" />
+<text  x="1062.89" y="319.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.03%)</title><rect x="1030.9" y="245" width="0.6" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1033.87" y="255.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1970 (2 samples, 0.07%)</title><rect x="1668.7" y="309" width="1.2" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="1671.70" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1929 (64 samples, 2.09%)</title><rect x="1216.6" y="293" width="37.1" height="15.0" fill="rgb(229,199,27)" rx="2" ry="2" />
+<text  x="1219.59" y="303.5" >ecs..</text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1875 (30 samples, 0.98%)</title><rect x="1371.6" y="293" width="17.4" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="1374.55" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (4 samples, 0.13%)</title><rect x="1082.5" y="293" width="2.3" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1085.53" y="303.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="988.5" y="293" width="0.6" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="991.51" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (3 samples, 0.10%)</title><rect x="1230.5" y="261" width="1.8" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1233.52" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (7 samples, 0.23%)</title><rect x="1272.3" y="277" width="4.1" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1275.31" y="287.5" ></text>
+</g>
+<g >
+<title>_int_free_chunk (2 samples, 0.07%)</title><rect x="1787.1" y="309" width="1.2" height="15.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="1790.10" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1881 (32 samples, 1.04%)</title><rect x="1194.5" y="277" width="18.6" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1197.54" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1887 (1 samples, 0.03%)</title><rect x="1658.8" y="277" width="0.6" height="15.0" fill="rgb(239,199,38)" rx="2" ry="2" />
+<text  x="1661.84" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_arena_alloc@pito_ecs.h:2797 (15 samples, 0.49%)</title><rect x="1290.9" y="293" width="8.7" height="15.0" fill="rgb(239,199,37)" rx="2" ry="2" />
+<text  x="1293.88" y="303.5" ></text>
+</g>
+<g >
+<title>memset@string_fortified.h:59 (10 samples, 0.33%)</title><rect x="1284.5" y="277" width="5.8" height="15.0" fill="rgb(225,144,23)" rx="2" ry="2" />
+<text  x="1287.50" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (2 samples, 0.07%)</title><rect x="1609.5" y="277" width="1.2" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1612.50" y="287.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.03%)</title><rect x="834.1" y="181" width="0.6" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="837.13" y="191.5" ></text>
+</g>
+<g >
+<title>ecs_cmd_flush_queue@pito_ecs.h:2418 (33 samples, 1.08%)</title><rect x="1447.0" y="325" width="19.2" height="15.0" fill="rgb(236,199,34)" rx="2" ry="2" />
+<text  x="1450.00" y="335.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1556.7" y="229" width="0.6" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1559.69" y="239.5" ></text>
+</g>
+<g >
+<title>irq_exit_rcu (1 samples, 0.03%)</title><rect x="1335.6" y="245" width="0.5" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="1338.57" y="255.5" ></text>
+</g>
+<g >
+<title>ecs_arena_reset@pito_ecs.h:2809 (3 samples, 0.10%)</title><rect x="1787.1" y="325" width="1.7" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1790.10" y="335.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.03%)</title><rect x="988.5" y="181" width="0.6" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="991.51" y="191.5" ></text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1890 (1 samples, 0.03%)</title><rect x="1659.4" y="277" width="0.6" height="15.0" fill="rgb(233,199,31)" rx="2" ry="2" />
+<text  x="1662.42" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (20 samples, 0.65%)</title><rect x="1090.7" y="277" width="11.6" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1093.65" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_cmd_flush_queue@pito_ecs.h:2404 (10 samples, 0.33%)</title><rect x="1307.7" y="325" width="5.8" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="1310.71" y="335.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (388 samples, 12.65%)</title><rect x="138.8" y="293" width="225.2" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="141.84" y="303.5" >pthread_mutex_lock</text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1890 (9 samples, 0.29%)</title><rect x="1430.2" y="277" width="5.2" height="15.0" fill="rgb(233,199,31)" rx="2" ry="2" />
+<text  x="1433.17" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (16 samples, 0.52%)</title><rect x="1678.0" y="261" width="9.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1680.99" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_sparse_set_remove@pito_ecs.h:2945 (1 samples, 0.03%)</title><rect x="1758.1" y="277" width="0.6" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="1761.08" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1873 (1 samples, 0.03%)</title><rect x="1778.4" y="293" width="0.6" height="15.0" fill="rgb(247,199,46)" rx="2" ry="2" />
+<text  x="1781.39" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1929 (44 samples, 1.43%)</title><rect x="1585.1" y="309" width="25.6" height="15.0" fill="rgb(229,199,27)" rx="2" ry="2" />
+<text  x="1588.13" y="319.5" >e..</text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.03%)</title><rect x="1477.2" y="197" width="0.6" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1480.18" y="207.5" ></text>
+</g>
+<g >
+<title>ktime_get_update_offsets_now (1 samples, 0.03%)</title><rect x="138.3" y="229" width="0.5" height="15.0" fill="rgb(236,114,35)" rx="2" ry="2" />
+<text  x="141.26" y="239.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (18 samples, 0.59%)</title><rect x="1049.4" y="293" width="10.5" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1052.45" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_cmd_flush_queue@pito_ecs.h:2421 (504 samples, 16.43%)</title><rect x="1494.6" y="325" width="292.5" height="15.0" fill="rgb(229,199,27)" rx="2" ry="2" />
+<text  x="1497.59" y="335.5" >ecs_cmd_flush_queue@pito_ecs.h:2421</text>
+</g>
+<g >
+<title>write_system@owned_mixed.c:12 (4 samples, 0.13%)</title><rect x="991.4" y="325" width="2.3" height="15.0" fill="rgb(242,108,41)" rx="2" ry="2" />
+<text  x="994.41" y="335.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.03%)</title><rect x="1030.9" y="181" width="0.6" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1033.87" y="191.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1906 (3 samples, 0.10%)</title><rect x="1435.4" y="293" width="1.7" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="1438.39" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1917 (21 samples, 0.68%)</title><rect x="1502.1" y="309" width="12.2" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="1505.14" y="319.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (2 samples, 0.07%)</title><rect x="1281.0" y="245" width="1.2" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="1284.01" y="255.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (2 samples, 0.07%)</title><rect x="1288.0" y="213" width="1.1" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1290.98" y="223.5" ></text>
+</g>
+<g >
+<title>pte_offset_map_rw_nolock (1 samples, 0.03%)</title><rect x="1288.6" y="165" width="0.5" height="15.0" fill="rgb(240,167,39)" rx="2" ry="2" />
+<text  x="1291.56" y="175.5" ></text>
+</g>
+<g >
+<title>ecs_arena_block_create@pito_ecs.h:2705 (8 samples, 0.26%)</title><rect x="1292.0" y="245" width="4.7" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="1295.04" y="255.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1016.9" y="261" width="0.6" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1019.94" y="271.5" ></text>
+</g>
+<g >
+<title>native_read_msr (1 samples, 0.03%)</title><rect x="1030.9" y="101" width="0.6" height="15.0" fill="rgb(241,158,40)" rx="2" ry="2" />
+<text  x="1033.87" y="111.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_set@pito_ecs.h:2681 (20 samples, 0.65%)</title><rect x="1585.1" y="293" width="11.6" height="15.0" fill="rgb(234,199,31)" rx="2" ry="2" />
+<text  x="1588.13" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1887 (5 samples, 0.16%)</title><rect x="397.1" y="293" width="2.9" height="15.0" fill="rgb(239,199,38)" rx="2" ry="2" />
+<text  x="400.11" y="303.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1477.2" y="261" width="0.6" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1480.18" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2667 (16 samples, 0.52%)</title><rect x="1140.6" y="277" width="9.3" height="15.0" fill="rgb(231,199,28)" rx="2" ry="2" />
+<text  x="1143.56" y="287.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.03%)</title><rect x="834.1" y="213" width="0.6" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="837.13" y="223.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (9 samples, 0.29%)</title><rect x="1653.0" y="277" width="5.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1656.03" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (2 samples, 0.07%)</title><rect x="1177.7" y="261" width="1.2" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1180.71" y="271.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.03%)</title><rect x="988.5" y="197" width="0.6" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="991.51" y="207.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (19 samples, 0.62%)</title><rect x="1376.2" y="277" width="11.0" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1379.19" y="287.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (1 samples, 0.03%)</title><rect x="1298.4" y="101" width="0.6" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="1301.43" y="111.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (2 samples, 0.07%)</title><rect x="362.9" y="277" width="1.1" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="365.87" y="287.5" ></text>
+</g>
+<g >
+<title>sched_tick (1 samples, 0.03%)</title><rect x="1556.7" y="149" width="0.6" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1559.69" y="159.5" ></text>
+</g>
+<g >
+<title>account_user_time (1 samples, 0.03%)</title><rect x="1477.2" y="149" width="0.6" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1480.18" y="159.5" ></text>
+</g>
+<g >
+<title>alloc_anon_folio (1 samples, 0.03%)</title><rect x="1294.9" y="85" width="0.6" height="15.0" fill="rgb(246,128,45)" rx="2" ry="2" />
+<text  x="1297.94" y="95.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (2 samples, 0.07%)</title><rect x="1436.0" y="277" width="1.1" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1438.97" y="287.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (2 samples, 0.07%)</title><rect x="1288.0" y="197" width="1.1" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="1290.98" y="207.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (1 samples, 0.03%)</title><rect x="1191.1" y="261" width="0.5" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1194.06" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_cmd_array_push@pito_ecs.h:2394 (2 samples, 0.07%)</title><rect x="1281.0" y="277" width="1.2" height="15.0" fill="rgb(247,199,46)" rx="2" ry="2" />
+<text  x="1284.01" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_set@pito_ecs.h:2684 (24 samples, 0.78%)</title><rect x="1596.7" y="293" width="14.0" height="15.0" fill="rgb(246,199,45)" rx="2" ry="2" />
+<text  x="1599.74" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1911 (5 samples, 0.16%)</title><rect x="1151.6" y="293" width="2.9" height="15.0" fill="rgb(227,199,24)" rx="2" ry="2" />
+<text  x="1154.59" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1899 (608 samples, 19.82%)</title><rect x="44.2" y="309" width="352.9" height="15.0" fill="rgb(235,199,33)" rx="2" ry="2" />
+<text  x="47.24" y="319.5" >ecs_get@pito_ecs.h:1899</text>
+</g>
+<g >
+<title>ecs_create@pito_ecs.h:1590 (29 samples, 0.95%)</title><rect x="1000.7" y="309" width="16.8" height="15.0" fill="rgb(235,199,33)" rx="2" ry="2" />
+<text  x="1003.69" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1873 (30 samples, 0.98%)</title><rect x="1347.8" y="293" width="17.4" height="15.0" fill="rgb(247,199,46)" rx="2" ry="2" />
+<text  x="1350.76" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (27 samples, 0.88%)</title><rect x="1559.0" y="261" width="15.7" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1562.01" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1940 (7 samples, 0.23%)</title><rect x="1630.4" y="309" width="4.1" height="15.0" fill="rgb(226,199,23)" rx="2" ry="2" />
+<text  x="1633.40" y="319.5" ></text>
+</g>
+<g >
+<title>vma_alloc_folio_noprof (1 samples, 0.03%)</title><rect x="1281.6" y="117" width="0.6" height="15.0" fill="rgb(246,112,45)" rx="2" ry="2" />
+<text  x="1284.59" y="127.5" ></text>
+</g>
+<g >
+<title>ecs_bitset_test@pito_ecs.h:2467 (1 samples, 0.03%)</title><rect x="1753.4" y="277" width="0.6" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1756.44" y="287.5" ></text>
+</g>
+<g >
+<title>_int_malloc (4 samples, 0.13%)</title><rect x="1297.3" y="213" width="2.3" height="15.0" fill="rgb(238,153,36)" rx="2" ry="2" />
+<text  x="1300.26" y="223.5" ></text>
+</g>
+<g >
+<title>__libc_malloc2 (5 samples, 0.16%)</title><rect x="1296.7" y="229" width="2.9" height="15.0" fill="rgb(252,154,52)" rx="2" ry="2" />
+<text  x="1299.68" y="239.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (5 samples, 0.16%)</title><rect x="1301.3" y="277" width="2.9" height="15.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="1304.33" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_create@pito_ecs.h:1595 (4 samples, 0.13%)</title><rect x="1017.5" y="309" width="2.3" height="15.0" fill="rgb(244,199,42)" rx="2" ry="2" />
+<text  x="1020.53" y="319.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1030.9" y="293" width="0.6" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1033.87" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_create@pito_ecs.h:1620 (2 samples, 0.07%)</title><rect x="1031.5" y="309" width="1.1" height="15.0" fill="rgb(230,199,27)" rx="2" ry="2" />
+<text  x="1034.45" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1773 (19 samples, 0.62%)</title><rect x="1073.8" y="309" width="11.0" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="1076.82" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_is_ready@pito_ecs.h:1761 (1 samples, 0.03%)</title><rect x="1330.9" y="309" width="0.6" height="15.0" fill="rgb(223,199,20)" rx="2" ry="2" />
+<text  x="1333.93" y="319.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="988.5" y="261" width="0.6" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="991.51" y="271.5" ></text>
+</g>
+<g >
+<title>srso_alias_return_thunk (1 samples, 0.03%)</title><rect x="1556.7" y="101" width="0.6" height="15.0" fill="rgb(236,147,34)" rx="2" ry="2" />
+<text  x="1559.69" y="111.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (2 samples, 0.07%)</title><rect x="362.9" y="245" width="1.1" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="365.87" y="255.5" ></text>
+</g>
+<g >
+<title>ecs_comp_blocks_resize@pito_ecs.h:3328 (2 samples, 0.07%)</title><rect x="1267.7" y="277" width="1.1" height="15.0" fill="rgb(235,199,33)" rx="2" ry="2" />
+<text  x="1270.67" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_cmd_flush_queue@pito_ecs.h:2413 (191 samples, 6.23%)</title><rect x="1336.1" y="325" width="110.9" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="1339.15" y="335.5" >ecs_cmd_flush..</text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1873 (21 samples, 0.68%)</title><rect x="1166.7" y="277" width="12.2" height="15.0" fill="rgb(247,199,46)" rx="2" ry="2" />
+<text  x="1169.68" y="287.5" ></text>
+</g>
+<g >
+<title>policy_nodemask (1 samples, 0.03%)</title><rect x="1281.6" y="85" width="0.6" height="15.0" fill="rgb(236,208,34)" rx="2" ry="2" />
+<text  x="1284.59" y="95.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1899 (10 samples, 0.33%)</title><rect x="1653.0" y="293" width="5.8" height="15.0" fill="rgb(235,199,33)" rx="2" ry="2" />
+<text  x="1656.03" y="303.5" ></text>
+</g>
+<g >
+<title>native_read_msr (1 samples, 0.03%)</title><rect x="1047.7" y="85" width="0.6" height="15.0" fill="rgb(241,158,40)" rx="2" ry="2" />
+<text  x="1050.70" y="95.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3032 (2 samples, 0.07%)</title><rect x="1676.8" y="293" width="1.2" height="15.0" fill="rgb(247,199,46)" rx="2" ry="2" />
+<text  x="1679.83" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_create@pito_ecs.h:1623 (27 samples, 0.88%)</title><rect x="1032.6" y="309" width="15.7" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="1035.61" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_clear@pito_ecs.h:2694 (23 samples, 0.75%)</title><rect x="1481.2" y="309" width="13.4" height="15.0" fill="rgb(245,199,44)" rx="2" ry="2" />
+<text  x="1484.24" y="319.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1556.7" y="261" width="0.6" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1559.69" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (1 samples, 0.03%)</title><rect x="1596.2" y="277" width="0.5" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1599.16" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (2 samples, 0.07%)</title><rect x="834.7" y="293" width="1.2" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="837.71" y="303.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.03%)</title><rect x="1477.2" y="213" width="0.6" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1480.18" y="223.5" ></text>
+</g>
+<g >
+<title>alloc_pages_mpol (1 samples, 0.03%)</title><rect x="1294.9" y="53" width="0.6" height="15.0" fill="rgb(237,128,35)" rx="2" ry="2" />
+<text  x="1297.94" y="63.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (5 samples, 0.16%)</title><rect x="1276.4" y="277" width="2.9" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1279.37" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (1 samples, 0.03%)</title><rect x="1477.8" y="293" width="0.5" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1480.76" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (1 samples, 0.03%)</title><rect x="1452.2" y="293" width="0.6" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1455.22" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_get_raw@pito_ecs.h:1888 (1 samples, 0.03%)</title><rect x="1429.6" y="277" width="0.6" height="15.0" fill="rgb(237,199,36)" rx="2" ry="2" />
+<text  x="1432.59" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3045 (7 samples, 0.23%)</title><rect x="1754.0" y="293" width="4.1" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="1757.02" y="303.5" ></text>
+</g>
+<g >
+<title>perf_adjust_freq_unthr_context (1 samples, 0.03%)</title><rect x="834.1" y="133" width="0.6" height="15.0" fill="rgb(230,184,27)" rx="2" ry="2" />
+<text  x="837.13" y="143.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1912 (3 samples, 0.10%)</title><rect x="1500.4" y="309" width="1.7" height="15.0" fill="rgb(243,199,42)" rx="2" ry="2" />
+<text  x="1503.39" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3044 (86 samples, 2.80%)</title><rect x="1704.1" y="293" width="49.9" height="15.0" fill="rgb(242,199,41)" rx="2" ry="2" />
+<text  x="1707.10" y="303.5" >ecs_s..</text>
+</g>
+<g >
+<title>exc_page_fault (2 samples, 0.07%)</title><rect x="1281.0" y="229" width="1.2" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="1284.01" y="239.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (13 samples, 0.42%)</title><rect x="1155.7" y="277" width="7.5" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1158.65" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1904 (275 samples, 8.97%)</title><rect x="397.1" y="309" width="159.6" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="400.11" y="319.5" >ecs_get@pito_ecs.h:1..</text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (4 samples, 0.13%)</title><rect x="1650.7" y="293" width="2.3" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1653.71" y="303.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (3 samples, 0.10%)</title><rect x="723.9" y="293" width="1.7" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="726.86" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_set@pito_ecs.h:2684 (36 samples, 1.17%)</title><rect x="1232.8" y="277" width="20.9" height="15.0" fill="rgb(246,199,45)" rx="2" ry="2" />
+<text  x="1235.84" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1877 (5 samples, 0.16%)</title><rect x="1389.0" y="293" width="2.9" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="1391.96" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_is_ready@pito_ecs.h:1761 (14 samples, 0.46%)</title><rect x="1452.8" y="309" width="8.1" height="15.0" fill="rgb(223,199,20)" rx="2" ry="2" />
+<text  x="1455.80" y="319.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 0.03%)</title><rect x="1298.4" y="149" width="0.6" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1301.43" y="159.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2665 (24 samples, 0.78%)</title><rect x="1194.5" y="261" width="14.0" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="1197.54" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1982 (5 samples, 0.16%)</title><rect x="1770.8" y="309" width="2.9" height="15.0" fill="rgb(247,199,46)" rx="2" ry="2" />
+<text  x="1773.85" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1906 (481 samples, 15.68%)</title><rect x="556.7" y="309" width="279.2" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="559.71" y="319.5" >ecs_get@pito_ecs.h:1906</text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1875 (16 samples, 0.52%)</title><rect x="1109.2" y="293" width="9.3" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="1112.22" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2665 (33 samples, 1.08%)</title><rect x="1391.9" y="277" width="19.1" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="1394.87" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_cmd_array_push@pito_ecs.h:2394 (10 samples, 0.33%)</title><rect x="1284.5" y="293" width="5.8" height="15.0" fill="rgb(247,199,46)" rx="2" ry="2" />
+<text  x="1287.50" y="303.5" ></text>
+</g>
+<g >
+<title>folio_batch_move_lru (1 samples, 0.03%)</title><rect x="1288.0" y="101" width="0.6" height="15.0" fill="rgb(238,208,36)" rx="2" ry="2" />
+<text  x="1290.98" y="111.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1047.7" y="261" width="0.6" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1050.70" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (4 samples, 0.13%)</title><rect x="1163.2" y="277" width="2.3" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1166.20" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1792 (15 samples, 0.49%)</title><rect x="1290.9" y="309" width="8.7" height="15.0" fill="rgb(247,199,47)" rx="2" ry="2" />
+<text  x="1293.88" y="319.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 0.03%)</title><rect x="1298.4" y="133" width="0.6" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="1301.43" y="143.5" ></text>
+</g>
+<g >
+<title>_int_free_merge_chunk (1 samples, 0.03%)</title><rect x="1788.8" y="293" width="0.6" height="15.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="1791.84" y="303.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.03%)</title><rect x="1477.2" y="181" width="0.6" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1480.18" y="191.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1335.6" y="277" width="0.5" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1338.57" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (16 samples, 0.52%)</title><rect x="1168.4" y="261" width="9.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1171.42" y="271.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (1 samples, 0.03%)</title><rect x="1281.6" y="165" width="0.6" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1284.59" y="175.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (1 samples, 0.03%)</title><rect x="1281.6" y="149" width="0.6" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="1284.59" y="159.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (8 samples, 0.26%)</title><rect x="1412.8" y="261" width="4.6" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1415.76" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (8 samples, 0.26%)</title><rect x="995.5" y="293" width="4.6" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="998.47" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_create@pito_ecs.h:1586 (9 samples, 0.29%)</title><rect x="995.5" y="309" width="5.2" height="15.0" fill="rgb(243,199,42)" rx="2" ry="2" />
+<text  x="998.47" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1882 (7 samples, 0.23%)</title><rect x="1581.1" y="293" width="4.0" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="1584.07" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2666 (2 samples, 0.07%)</title><rect x="1139.4" y="277" width="1.2" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1142.40" y="287.5" ></text>
+</g>
+<g >
+<title>sync_regs (2 samples, 0.07%)</title><rect x="1289.1" y="261" width="1.2" height="15.0" fill="rgb(238,183,36)" rx="2" ry="2" />
+<text  x="1292.14" y="271.5" ></text>
+</g>
+<g >
+<title>handle_softirqs (1 samples, 0.03%)</title><rect x="1335.6" y="213" width="0.5" height="15.0" fill="rgb(238,146,37)" rx="2" ry="2" />
+<text  x="1338.57" y="223.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="834.1" y="261" width="0.6" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="837.13" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2667 (10 samples, 0.33%)</title><rect x="1412.2" y="277" width="5.8" height="15.0" fill="rgb(231,199,28)" rx="2" ry="2" />
+<text  x="1415.18" y="287.5" ></text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.03%)</title><rect x="1047.7" y="181" width="0.6" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="1050.70" y="191.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1983 (8 samples, 0.26%)</title><rect x="1773.7" y="309" width="4.7" height="15.0" fill="rgb(245,199,44)" rx="2" ry="2" />
+<text  x="1776.75" y="319.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (1 samples, 0.03%)</title><rect x="1294.9" y="149" width="0.6" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1297.94" y="159.5" ></text>
+</g>
+<g >
+<title>__irq_exit_rcu (1 samples, 0.03%)</title><rect x="1335.6" y="229" width="0.5" height="15.0" fill="rgb(238,125,36)" rx="2" ry="2" />
+<text  x="1338.57" y="239.5" ></text>
+</g>
+<g >
+<title>memcpy@plt (1 samples, 0.03%)</title><rect x="1442.9" y="277" width="0.6" height="15.0" fill="rgb(231,144,29)" rx="2" ry="2" />
+<text  x="1445.94" y="287.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (2 samples, 0.07%)</title><rect x="362.9" y="229" width="1.1" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="365.87" y="239.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (24 samples, 0.78%)</title><rect x="1123.2" y="261" width="13.9" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1126.15" y="271.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 0.03%)</title><rect x="1294.9" y="181" width="0.6" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="1297.94" y="191.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1779 (112 samples, 3.65%)</title><rect x="1084.8" y="309" width="65.1" height="15.0" fill="rgb(237,199,36)" rx="2" ry="2" />
+<text  x="1087.85" y="319.5" >ecs_set..</text>
+</g>
+<g >
+<title>do_user_addr_fault (1 samples, 0.03%)</title><rect x="1294.9" y="165" width="0.6" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="1297.94" y="175.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1904 (11 samples, 0.36%)</title><rect x="1429.0" y="293" width="6.4" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="1432.01" y="303.5" ></text>
+</g>
+<g >
+<title>perf_adjust_freq_unthr_context (1 samples, 0.03%)</title><rect x="1030.9" y="149" width="0.6" height="15.0" fill="rgb(230,184,27)" rx="2" ry="2" />
+<text  x="1033.87" y="159.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="138.3" y="277" width="0.5" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="141.26" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_is_ready@pito_ecs.h:1762 (8 samples, 0.26%)</title><rect x="1331.5" y="309" width="4.6" height="15.0" fill="rgb(239,199,37)" rx="2" ry="2" />
+<text  x="1334.51" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3035 (37 samples, 1.21%)</title><rect x="1678.0" y="293" width="21.5" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="1680.99" y="303.5" >e..</text>
+</g>
+<g >
+<title>update_process_times (1 samples, 0.03%)</title><rect x="363.4" y="181" width="0.6" height="15.0" fill="rgb(243,150,42)" rx="2" ry="2" />
+<text  x="366.45" y="191.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (2 samples, 0.07%)</title><rect x="1288.0" y="261" width="1.1" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="1290.98" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1768 (8 samples, 0.26%)</title><rect x="1338.5" y="309" width="4.6" height="15.0" fill="rgb(228,199,26)" rx="2" ry="2" />
+<text  x="1341.47" y="319.5" ></text>
+</g>
+<g >
+<title>update_system@owned_mixed.c:24 (47 samples, 1.53%)</title><rect x="10.0" y="325" width="27.3" height="15.0" fill="rgb(237,150,36)" rx="2" ry="2" />
+<text  x="13.00" y="335.5" >u..</text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.03%)</title><rect x="988.5" y="213" width="0.6" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="991.51" y="223.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (188 samples, 6.13%)</title><rect x="725.6" y="293" width="109.1" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="728.60" y="303.5" >pthread_mutex..</text>
+</g>
+<g >
+<title>memcpy@string_fortified.h:29 (9 samples, 0.29%)</title><rect x="1438.3" y="293" width="5.2" height="15.0" fill="rgb(229,144,26)" rx="2" ry="2" />
+<text  x="1441.29" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (8 samples, 0.26%)</title><rect x="1576.4" y="261" width="4.7" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1579.42" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1873 (28 samples, 0.91%)</title><rect x="1086.0" y="293" width="16.3" height="15.0" fill="rgb(247,199,46)" rx="2" ry="2" />
+<text  x="1089.01" y="303.5" ></text>
+</g>
+<g >
+<title>folio_add_lru_vma (1 samples, 0.03%)</title><rect x="1298.4" y="85" width="0.6" height="15.0" fill="rgb(224,208,21)" rx="2" ry="2" />
+<text  x="1301.43" y="95.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (33 samples, 1.08%)</title><rect x="1520.1" y="277" width="19.2" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1523.13" y="287.5" ></text>
+</g>
+<g >
+<title>run_systems@bench_picto.h:60 (3,067 samples, 100.00%)</title><rect x="10.0" y="357" width="1780.0" height="15.0" fill="rgb(223,156,19)" rx="2" ry="2" />
+<text  x="13.00" y="367.5" >run_systems@bench_picto.h:60</text>
+</g>
+<g >
+<title>amd_pmu_disable_all (1 samples, 0.03%)</title><rect x="834.1" y="101" width="0.6" height="15.0" fill="rgb(230,110,28)" rx="2" ry="2" />
+<text  x="837.13" y="111.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (1 samples, 0.03%)</title><rect x="1375.6" y="277" width="0.6" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1378.61" y="287.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1477.2" y="245" width="0.6" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1480.18" y="255.5" ></text>
+</g>
+<g >
+<title>memset@string_fortified.h:59 (2 samples, 0.07%)</title><rect x="1281.0" y="261" width="1.2" height="15.0" fill="rgb(225,144,23)" rx="2" ry="2" />
+<text  x="1284.01" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1881 (47 samples, 1.53%)</title><rect x="1122.6" y="293" width="27.3" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1125.57" y="303.5" >e..</text>
+</g>
+<g >
+<title>ecs_bitset_flip@pito_ecs.h:2460 (1 samples, 0.03%)</title><rect x="1232.3" y="261" width="0.5" height="15.0" fill="rgb(227,199,24)" rx="2" ry="2" />
+<text  x="1235.26" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_bitset_test@pito_ecs.h:2467 (7 samples, 0.23%)</title><rect x="1581.1" y="277" width="4.0" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1584.07" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (3 samples, 0.10%)</title><rect x="1574.7" y="261" width="1.7" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1577.68" y="271.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.03%)</title><rect x="1016.9" y="229" width="0.6" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1019.94" y="239.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1923 (88 samples, 2.87%)</title><rect x="1165.5" y="293" width="51.1" height="15.0" fill="rgb(240,199,38)" rx="2" ry="2" />
+<text  x="1168.52" y="303.5" >ecs_a..</text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.03%)</title><rect x="1030.9" y="213" width="0.6" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1033.87" y="223.5" ></text>
+</g>
+<g >
+<title>write_system@owned_mixed.c:10 (4 samples, 0.13%)</title><rect x="989.1" y="325" width="2.3" height="15.0" fill="rgb(228,108,25)" rx="2" ry="2" />
+<text  x="992.09" y="335.5" ></text>
+</g>
+<g >
+<title>perf_event_task_tick (1 samples, 0.03%)</title><rect x="1030.9" y="165" width="0.6" height="15.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="1033.87" y="175.5" ></text>
+</g>
+<g >
+<title>perf_event_task_tick (1 samples, 0.03%)</title><rect x="834.1" y="149" width="0.6" height="15.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="837.13" y="159.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1874 (5 samples, 0.16%)</title><rect x="1178.9" y="277" width="2.9" height="15.0" fill="rgb(245,199,45)" rx="2" ry="2" />
+<text  x="1181.87" y="287.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1502.7" y="293" width="0.6" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1505.72" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1941 (18 samples, 0.59%)</title><rect x="1268.8" y="293" width="10.5" height="15.0" fill="rgb(224,199,21)" rx="2" ry="2" />
+<text  x="1271.83" y="303.5" ></text>
+</g>
+<g >
+<title>x86_pmu_disable_all (1 samples, 0.03%)</title><rect x="834.1" y="85" width="0.6" height="15.0" fill="rgb(230,205,28)" rx="2" ry="2" />
+<text  x="837.13" y="95.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1882 (6 samples, 0.20%)</title><rect x="1213.1" y="277" width="3.5" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="1216.11" y="287.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 0.03%)</title><rect x="1298.4" y="197" width="0.6" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="1301.43" y="207.5" ></text>
+</g>
+<g >
+<title>__raw_spin_lock_irqsave (1 samples, 0.03%)</title><rect x="1016.9" y="197" width="0.6" height="15.0" fill="rgb(243,135,42)" rx="2" ry="2" />
+<text  x="1019.94" y="207.5" ></text>
+</g>
+<g >
+<title>handle_mm_fault (2 samples, 0.07%)</title><rect x="1281.0" y="197" width="1.2" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1284.01" y="207.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (14 samples, 0.46%)</title><rect x="1420.3" y="277" width="8.1" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1423.30" y="287.5" ></text>
+</g>
+<g >
+<title>folio_add_lru (1 samples, 0.03%)</title><rect x="1288.0" y="133" width="0.6" height="15.0" fill="rgb(238,208,36)" rx="2" ry="2" />
+<text  x="1290.98" y="143.5" ></text>
+</g>
+<g >
+<title>run_timer_softirq (1 samples, 0.03%)</title><rect x="1335.6" y="197" width="0.5" height="15.0" fill="rgb(239,156,37)" rx="2" ry="2" />
+<text  x="1338.57" y="207.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1205.6" y="229" width="0.5" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1208.57" y="239.5" ></text>
+</g>
+<g >
+<title>_int_free_chunk (1 samples, 0.03%)</title><rect x="1788.8" y="309" width="0.6" height="15.0" fill="rgb(236,153,34)" rx="2" ry="2" />
+<text  x="1791.84" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2667 (13 samples, 0.42%)</title><rect x="1691.9" y="277" width="7.6" height="15.0" fill="rgb(231,199,28)" rx="2" ry="2" />
+<text  x="1694.92" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3071 (21 samples, 0.68%)</title><rect x="1758.7" y="293" width="12.1" height="15.0" fill="rgb(239,199,37)" rx="2" ry="2" />
+<text  x="1761.66" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_bitset_test@pito_ecs.h:2467 (7 samples, 0.23%)</title><rect x="1754.0" y="277" width="4.1" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1757.02" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_create@pito_ecs.h:1625 (20 samples, 0.65%)</title><rect x="1048.3" y="309" width="11.6" height="15.0" fill="rgb(239,199,37)" rx="2" ry="2" />
+<text  x="1051.28" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_arena_block_create@pito_ecs.h:2710 (5 samples, 0.16%)</title><rect x="1296.7" y="245" width="2.9" height="15.0" fill="rgb(230,199,28)" rx="2" ry="2" />
+<text  x="1299.68" y="255.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (8 samples, 0.26%)</title><rect x="1077.9" y="293" width="4.6" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1080.88" y="303.5" ></text>
+</g>
+<g >
+<title>alloc_pages_mpol (1 samples, 0.03%)</title><rect x="1281.6" y="101" width="0.6" height="15.0" fill="rgb(237,128,35)" rx="2" ry="2" />
+<text  x="1284.59" y="111.5" ></text>
+</g>
+<g >
+<title>ecs_create@pito_ecs.h:1583 (2 samples, 0.07%)</title><rect x="994.3" y="309" width="1.2" height="15.0" fill="rgb(248,199,48)" rx="2" ry="2" />
+<text  x="997.31" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1973 (5 samples, 0.16%)</title><rect x="1669.9" y="309" width="2.9" height="15.0" fill="rgb(246,199,46)" rx="2" ry="2" />
+<text  x="1672.86" y="319.5" ></text>
+</g>
+<g >
+<title>calc_global_load (1 samples, 0.03%)</title><rect x="362.9" y="165" width="0.5" height="15.0" fill="rgb(243,112,41)" rx="2" ry="2" />
+<text  x="365.87" y="175.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.03%)</title><rect x="988.5" y="229" width="0.6" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="991.51" y="239.5" ></text>
+</g>
+<g >
+<title>vma_alloc_folio_noprof (1 samples, 0.03%)</title><rect x="1294.9" y="69" width="0.6" height="15.0" fill="rgb(246,112,45)" rx="2" ry="2" />
+<text  x="1297.94" y="79.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1983 (3 samples, 0.10%)</title><rect x="1282.2" y="293" width="1.7" height="15.0" fill="rgb(245,199,44)" rx="2" ry="2" />
+<text  x="1285.17" y="303.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.03%)</title><rect x="1556.7" y="197" width="0.6" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1559.69" y="207.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.03%)</title><rect x="834.1" y="229" width="0.6" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="837.13" y="239.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1939 (34 samples, 1.11%)</title><rect x="1610.7" y="309" width="19.7" height="15.0" fill="rgb(228,199,26)" rx="2" ry="2" />
+<text  x="1613.67" y="319.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (28 samples, 0.91%)</title><rect x="1348.9" y="277" width="16.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1351.92" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1779 (1 samples, 0.03%)</title><rect x="1778.4" y="309" width="0.6" height="15.0" fill="rgb(237,199,36)" rx="2" ry="2" />
+<text  x="1781.39" y="319.5" ></text>
+</g>
+<g >
+<title>handle_pte_fault (1 samples, 0.03%)</title><rect x="1294.9" y="117" width="0.6" height="15.0" fill="rgb(228,146,25)" rx="2" ry="2" />
+<text  x="1297.94" y="127.5" ></text>
+</g>
+<g >
+<title>ecs_cmd_flush_queue@pito_ecs.h:2420 (49 samples, 1.60%)</title><rect x="1466.2" y="325" width="28.4" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="1469.15" y="335.5" >ec..</text>
+</g>
+<g >
+<title>ecs_is_ready@pito_ecs.h:1760 (2 samples, 0.07%)</title><rect x="1451.6" y="309" width="1.2" height="15.0" fill="rgb(225,199,22)" rx="2" ry="2" />
+<text  x="1454.64" y="319.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (14 samples, 0.46%)</title><rect x="1182.9" y="261" width="8.2" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1185.93" y="271.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (1 samples, 0.03%)</title><rect x="1789.4" y="309" width="0.6" height="15.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="1792.42" y="319.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (16 samples, 0.52%)</title><rect x="1109.2" y="277" width="9.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1112.22" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_clear@pito_ecs.h:2691 (20 samples, 0.65%)</title><rect x="1466.7" y="309" width="11.6" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1469.73" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2667 (5 samples, 0.16%)</title><rect x="1210.2" y="261" width="2.9" height="15.0" fill="rgb(231,199,28)" rx="2" ry="2" />
+<text  x="1213.21" y="271.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (4 samples, 0.13%)</title><rect x="1137.1" y="261" width="2.3" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1140.08" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2665 (16 samples, 0.52%)</title><rect x="1678.0" y="277" width="9.3" height="15.0" fill="rgb(234,199,32)" rx="2" ry="2" />
+<text  x="1680.99" y="287.5" ></text>
+</g>
+<g >
+<title>do_anonymous_page (1 samples, 0.03%)</title><rect x="1294.9" y="101" width="0.6" height="15.0" fill="rgb(248,189,47)" rx="2" ry="2" />
+<text  x="1297.94" y="111.5" ></text>
+</g>
+<g >
+<title>tick_nohz_handler (1 samples, 0.03%)</title><rect x="1047.7" y="197" width="0.6" height="15.0" fill="rgb(245,142,44)" rx="2" ry="2" />
+<text  x="1050.70" y="207.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="138.3" y="293" width="0.5" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="141.26" y="303.5" ></text>
+</g>
+<g >
+<title>memset@string_fortified.h:59 (5 samples, 0.16%)</title><rect x="1669.9" y="293" width="2.9" height="15.0" fill="rgb(225,144,23)" rx="2" ry="2" />
+<text  x="1672.86" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_create@pito_ecs.h:1605 (20 samples, 0.65%)</title><rect x="1019.8" y="309" width="11.7" height="15.0" fill="rgb(241,199,39)" rx="2" ry="2" />
+<text  x="1022.85" y="319.5" ></text>
+</g>
+<g >
+<title>asm_exc_page_fault (1 samples, 0.03%)</title><rect x="1294.9" y="197" width="0.6" height="15.0" fill="rgb(228,145,25)" rx="2" ry="2" />
+<text  x="1297.94" y="207.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (11 samples, 0.36%)</title><rect x="1142.3" y="261" width="6.4" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1145.31" y="271.5" ></text>
+</g>
+<g >
+<title>exc_page_fault (1 samples, 0.03%)</title><rect x="1298.4" y="181" width="0.6" height="15.0" fill="rgb(228,161,25)" rx="2" ry="2" />
+<text  x="1301.43" y="191.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (1 samples, 0.03%)</title><rect x="1265.3" y="277" width="0.6" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1268.34" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (1 samples, 0.03%)</title><rect x="1329.8" y="293" width="0.5" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1332.77" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1939 (21 samples, 0.68%)</title><rect x="1253.7" y="293" width="12.2" height="15.0" fill="rgb(228,199,26)" rx="2" ry="2" />
+<text  x="1256.74" y="303.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1335.6" y="261" width="0.5" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1338.57" y="271.5" ></text>
+</g>
+<g >
+<title>all (3,067 samples, 100%)</title><rect x="10.0" y="373" width="1780.0" height="15.0" fill="rgb(255,230,55)" rx="2" ry="2" />
+<text  x="13.00" y="383.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (16 samples, 0.52%)</title><rect x="1548.0" y="277" width="9.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1550.99" y="287.5" ></text>
+</g>
+<g >
+<title>account_process_tick (1 samples, 0.03%)</title><rect x="1477.2" y="165" width="0.6" height="15.0" fill="rgb(236,164,34)" rx="2" ry="2" />
+<text  x="1480.18" y="175.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (55 samples, 1.79%)</title><rect x="364.0" y="293" width="31.9" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="367.03" y="303.5" >pt..</text>
+</g>
+<g >
+<title>pthread_mutex_unlock (8 samples, 0.26%)</title><rect x="1331.5" y="293" width="4.6" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1334.51" y="303.5" ></text>
+</g>
+<g >
+<title>folio_add_lru_vma (1 samples, 0.03%)</title><rect x="1288.0" y="149" width="0.6" height="15.0" fill="rgb(224,208,21)" rx="2" ry="2" />
+<text  x="1290.98" y="159.5" ></text>
+</g>
+<g >
+<title>tick_do_update_jiffies64 (1 samples, 0.03%)</title><rect x="362.9" y="181" width="0.5" height="15.0" fill="rgb(235,142,33)" rx="2" ry="2" />
+<text  x="365.87" y="191.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1875 (17 samples, 0.55%)</title><rect x="1181.8" y="277" width="9.8" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="1184.77" y="287.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (2 samples, 0.07%)</title><rect x="1148.7" y="261" width="1.2" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1151.69" y="271.5" ></text>
+</g>
+<g >
+<title>sync_regs (1 samples, 0.03%)</title><rect x="1299.0" y="197" width="0.6" height="15.0" fill="rgb(238,183,36)" rx="2" ry="2" />
+<text  x="1302.01" y="207.5" ></text>
+</g>
+<g >
+<title>srso_alias_safe_ret (1 samples, 0.03%)</title><rect x="988.5" y="149" width="0.6" height="15.0" fill="rgb(238,147,36)" rx="2" ry="2" />
+<text  x="991.51" y="159.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (2 samples, 0.07%)</title><rect x="395.9" y="293" width="1.2" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="398.95" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (27 samples, 0.88%)</title><rect x="1237.5" y="261" width="15.7" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1240.49" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1899 (17 samples, 0.55%)</title><rect x="1419.1" y="293" width="9.9" height="15.0" fill="rgb(235,199,33)" rx="2" ry="2" />
+<text  x="1422.14" y="303.5" ></text>
+</g>
+<g >
+<title>_raw_spin_lock_irqsave (1 samples, 0.03%)</title><rect x="1016.9" y="213" width="0.6" height="15.0" fill="rgb(243,166,42)" rx="2" ry="2" />
+<text  x="1019.94" y="223.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned (3 samples, 0.10%)</title><rect x="1299.6" y="277" width="1.7" height="15.0" fill="rgb(251,151,51)" rx="2" ry="2" />
+<text  x="1302.59" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2279 (826 samples, 26.93%)</title><rect x="1307.7" y="341" width="479.4" height="15.0" fill="rgb(241,199,40)" rx="2" ry="2" />
+<text  x="1310.71" y="351.5" >ecs_run_system@pito_ecs.h:2279</text>
+</g>
+<g >
+<title>ecs_arena_alloc_align@pito_ecs.h:2781 (13 samples, 0.42%)</title><rect x="1292.0" y="277" width="7.6" height="15.0" fill="rgb(233,199,31)" rx="2" ry="2" />
+<text  x="1295.04" y="287.5" ></text>
+</g>
+<g >
+<title>bench_work@bench.h:82 (203 samples, 6.62%)</title><rect x="871.3" y="309" width="117.8" height="15.0" fill="rgb(246,149,46)" rx="2" ry="2" />
+<text  x="874.27" y="319.5" >bench_work@ben..</text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="834.1" y="277" width="0.6" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="837.13" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_cmd_flush_queue@pito_ecs.h:2408 (17 samples, 0.55%)</title><rect x="1313.5" y="325" width="9.9" height="15.0" fill="rgb(237,199,35)" rx="2" ry="2" />
+<text  x="1316.51" y="335.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (11 samples, 0.36%)</title><rect x="1691.9" y="261" width="6.4" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1694.92" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1786 (2 samples, 0.07%)</title><rect x="1418.0" y="309" width="1.1" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="1420.98" y="319.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1016.9" y="245" width="0.6" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1019.94" y="255.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1877 (1 samples, 0.03%)</title><rect x="1557.3" y="293" width="0.6" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="1560.27" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_get@pito_ecs.h:1904 (2 samples, 0.07%)</title><rect x="1658.8" y="293" width="1.2" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="1661.84" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2666 (2 samples, 0.07%)</title><rect x="1411.0" y="277" width="1.2" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1414.02" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1793 (8 samples, 0.26%)</title><rect x="1299.6" y="309" width="4.6" height="15.0" fill="rgb(246,199,45)" rx="2" ry="2" />
+<text  x="1302.59" y="319.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1556.7" y="245" width="0.6" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="1559.69" y="255.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (9 samples, 0.29%)</title><rect x="1460.9" y="293" width="5.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1463.93" y="303.5" ></text>
+</g>
+<g >
+<title>perf_event_task_tick (1 samples, 0.03%)</title><rect x="1556.7" y="133" width="0.6" height="15.0" fill="rgb(236,184,34)" rx="2" ry="2" />
+<text  x="1559.69" y="143.5" ></text>
+</g>
+<g >
+<title>ecs_run_system@pito_ecs.h:2230 (1,687 samples, 55.00%)</title><rect x="10.0" y="341" width="979.1" height="15.0" fill="rgb(231,199,29)" rx="2" ry="2" />
+<text  x="13.00" y="351.5" >ecs_run_system@pito_ecs.h:2230</text>
+</g>
+<g >
+<title>ecs_bitset_flip@pito_ecs.h:2462 (5 samples, 0.16%)</title><rect x="1478.3" y="277" width="2.9" height="15.0" fill="rgb(241,199,39)" rx="2" ry="2" />
+<text  x="1481.34" y="287.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.03%)</title><rect x="138.3" y="245" width="0.5" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="141.26" y="255.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (1 samples, 0.03%)</title><rect x="1330.3" y="293" width="0.6" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1333.35" y="303.5" ></text>
+</g>
+<g >
+<title>write_system@owned_mixed.c:14 (418 samples, 13.63%)</title><rect x="1065.1" y="325" width="242.6" height="15.0" fill="rgb(239,108,37)" rx="2" ry="2" />
+<text  x="1068.12" y="335.5" >write_system@owned_mixed.c:14</text>
+</g>
+<g >
+<title>__alloc_frozen_pages_noprof (1 samples, 0.03%)</title><rect x="1294.9" y="37" width="0.6" height="15.0" fill="rgb(246,151,45)" rx="2" ry="2" />
+<text  x="1297.94" y="47.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (27 samples, 0.88%)</title><rect x="1392.4" y="261" width="15.7" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1395.45" y="271.5" ></text>
+</g>
+<g >
+<title>cfree@GLIBC_2.2.5 (1 samples, 0.03%)</title><rect x="1788.3" y="309" width="0.5" height="15.0" fill="rgb(246,123,45)" rx="2" ry="2" />
+<text  x="1791.26" y="319.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.03%)</title><rect x="1047.7" y="229" width="0.6" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1050.70" y="239.5" ></text>
+</g>
+<g >
+<title>__libc_malloc2 (6 samples, 0.20%)</title><rect x="1292.0" y="229" width="3.5" height="15.0" fill="rgb(252,154,52)" rx="2" ry="2" />
+<text  x="1295.04" y="239.5" ></text>
+</g>
+<g >
+<title>x86_pmu_disable (1 samples, 0.03%)</title><rect x="1030.9" y="133" width="0.6" height="15.0" fill="rgb(241,205,40)" rx="2" ry="2" />
+<text  x="1033.87" y="143.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (1 samples, 0.03%)</title><rect x="1417.4" y="261" width="0.6" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1420.40" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_arena_alloc_align@pito_ecs.h:2775 (1 samples, 0.03%)</title><rect x="1290.9" y="277" width="0.6" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="1293.88" y="287.5" ></text>
+</g>
+<g >
+<title>folio_add_lru (1 samples, 0.03%)</title><rect x="1298.4" y="69" width="0.6" height="15.0" fill="rgb(238,208,36)" rx="2" ry="2" />
+<text  x="1301.43" y="79.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (4 samples, 0.13%)</title><rect x="1444.1" y="309" width="2.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1447.10" y="319.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock@plt (3 samples, 0.10%)</title><rect x="1667.0" y="277" width="1.7" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1669.96" y="287.5" ></text>
+</g>
+<g >
+<title>perf_adjust_freq_unthr_context (1 samples, 0.03%)</title><rect x="1556.7" y="117" width="0.6" height="15.0" fill="rgb(230,184,27)" rx="2" ry="2" />
+<text  x="1559.69" y="127.5" ></text>
+</g>
+<g >
+<title>__folio_batch_add_and_move (1 samples, 0.03%)</title><rect x="1288.0" y="117" width="0.6" height="15.0" fill="rgb(242,135,41)" rx="2" ry="2" />
+<text  x="1290.98" y="127.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1799 (11 samples, 0.36%)</title><rect x="1437.1" y="309" width="6.4" height="15.0" fill="rgb(235,199,33)" rx="2" ry="2" />
+<text  x="1440.13" y="319.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (16 samples, 0.52%)</title><rect x="1641.4" y="293" width="9.3" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1644.42" y="303.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (14 samples, 0.46%)</title><rect x="1040.2" y="293" width="8.1" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1043.16" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1940 (5 samples, 0.16%)</title><rect x="1265.9" y="293" width="2.9" height="15.0" fill="rgb(226,199,23)" rx="2" ry="2" />
+<text  x="1268.92" y="303.5" ></text>
+</g>
+<g >
+<title>tmigr_handle_remote_up (1 samples, 0.03%)</title><rect x="1335.6" y="165" width="0.5" height="15.0" fill="rgb(236,102,34)" rx="2" ry="2" />
+<text  x="1338.57" y="175.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock (7 samples, 0.23%)</title><rect x="1343.1" y="293" width="4.1" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1346.11" y="303.5" ></text>
+</g>
+<g >
+<title>hrtimer_interrupt (1 samples, 0.03%)</title><rect x="1477.2" y="229" width="0.6" height="15.0" fill="rgb(236,152,34)" rx="2" ry="2" />
+<text  x="1480.18" y="239.5" ></text>
+</g>
+<g >
+<title>ecs_cmd_array_push@pito_ecs.h:2382 (3 samples, 0.10%)</title><rect x="1279.3" y="277" width="1.7" height="15.0" fill="rgb(251,199,51)" rx="2" ry="2" />
+<text  x="1282.27" y="287.5" ></text>
+</g>
+<g >
+<title>amd_pmu_disable_all (1 samples, 0.03%)</title><rect x="1030.9" y="117" width="0.6" height="15.0" fill="rgb(230,110,28)" rx="2" ry="2" />
+<text  x="1033.87" y="127.5" ></text>
+</g>
+<g >
+<title>do_user_addr_fault (2 samples, 0.07%)</title><rect x="1288.0" y="229" width="1.1" height="15.0" fill="rgb(228,189,25)" rx="2" ry="2" />
+<text  x="1290.98" y="239.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_unlock (14 samples, 0.46%)</title><rect x="1779.0" y="309" width="8.1" height="15.0" fill="rgb(240,158,39)" rx="2" ry="2" />
+<text  x="1781.97" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_add@pito_ecs.h:1980 (162 samples, 5.28%)</title><rect x="1676.8" y="309" width="94.0" height="15.0" fill="rgb(233,199,31)" rx="2" ry="2" />
+<text  x="1679.83" y="319.5" >ecs_add@pit..</text>
+</g>
+<g >
+<title>ecs_comp_bits_load@pito_ecs.h:2666 (8 samples, 0.26%)</title><rect x="1687.3" y="277" width="4.6" height="15.0" fill="rgb(232,199,30)" rx="2" ry="2" />
+<text  x="1690.27" y="287.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_set@pito_ecs.h:2682 (1 samples, 0.03%)</title><rect x="1232.3" y="277" width="0.5" height="15.0" fill="rgb(249,199,49)" rx="2" ry="2" />
+<text  x="1235.26" y="287.5" ></text>
+</g>
+<g >
+<title>__hrtimer_run_queues (1 samples, 0.03%)</title><rect x="1047.7" y="213" width="0.6" height="15.0" fill="rgb(237,128,36)" rx="2" ry="2" />
+<text  x="1050.70" y="223.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (1 samples, 0.03%)</title><rect x="1658.3" y="277" width="0.5" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1661.26" y="287.5" ></text>
+</g>
+<g >
+<title>__sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1047.7" y="245" width="0.6" height="15.0" fill="rgb(236,132,34)" rx="2" ry="2" />
+<text  x="1050.70" y="255.5" ></text>
+</g>
+<g >
+<title>amd_pmu_disable_all (1 samples, 0.03%)</title><rect x="1047.7" y="101" width="0.6" height="15.0" fill="rgb(230,110,28)" rx="2" ry="2" />
+<text  x="1050.70" y="111.5" ></text>
+</g>
+<g >
+<title>pthread_mutex_lock@plt (4 samples, 0.13%)</title><rect x="1206.1" y="245" width="2.4" height="15.0" fill="rgb(231,158,29)" rx="2" ry="2" />
+<text  x="1209.15" y="255.5" ></text>
+</g>
+<g >
+<title>ecs_sync_add_remove@pito_ecs.h:3064 (1 samples, 0.03%)</title><rect x="1758.1" y="293" width="0.6" height="15.0" fill="rgb(240,199,39)" rx="2" ry="2" />
+<text  x="1761.08" y="303.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1786 (1 samples, 0.03%)</title><rect x="1283.9" y="309" width="0.6" height="15.0" fill="rgb(242,199,40)" rx="2" ry="2" />
+<text  x="1286.92" y="319.5" ></text>
+</g>
+<g >
+<title>__handle_mm_fault (1 samples, 0.03%)</title><rect x="1294.9" y="133" width="0.6" height="15.0" fill="rgb(228,128,25)" rx="2" ry="2" />
+<text  x="1297.94" y="143.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1773 (7 samples, 0.23%)</title><rect x="1343.1" y="309" width="4.1" height="15.0" fill="rgb(248,199,47)" rx="2" ry="2" />
+<text  x="1346.11" y="319.5" ></text>
+</g>
+<g >
+<title>ecs_set@pito_ecs.h:1781 (231 samples, 7.53%)</title><rect x="1149.9" y="309" width="134.0" height="15.0" fill="rgb(233,199,31)" rx="2" ry="2" />
+<text  x="1152.85" y="319.5" >ecs_set@pito_ecs..</text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (1 samples, 0.03%)</title><rect x="1016.9" y="277" width="0.6" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1019.94" y="287.5" ></text>
+</g>
+<g >
+<title>sysvec_apic_timer_interrupt (2 samples, 0.07%)</title><rect x="362.9" y="261" width="1.1" height="15.0" fill="rgb(236,167,34)" rx="2" ry="2" />
+<text  x="365.87" y="271.5" ></text>
+</g>
+<g >
+<title>ecs_comp_bits_set@pito_ecs.h:2681 (27 samples, 0.88%)</title><rect x="1216.6" y="277" width="15.7" height="15.0" fill="rgb(234,199,31)" rx="2" ry="2" />
+<text  x="1219.59" y="287.5" ></text>
+</g>
+<g >
+<title>perf_adjust_freq_unthr_context (1 samples, 0.03%)</title><rect x="1047.7" y="133" width="0.6" height="15.0" fill="rgb(230,184,27)" rx="2" ry="2" />
+<text  x="1050.70" y="143.5" ></text>
+</g>
+<g >
+<title>ecs_has@pito_ecs.h:1875 (17 samples, 0.55%)</title><rect x="1547.4" y="293" width="9.9" height="15.0" fill="rgb(244,199,43)" rx="2" ry="2" />
+<text  x="1550.40" y="303.5" ></text>
+</g>
+<g >
+<title>task_tick_fair (1 samples, 0.03%)</title><rect x="988.5" y="165" width="0.6" height="15.0" fill="rgb(240,114,39)" rx="2" ry="2" />
+<text  x="991.51" y="175.5" ></text>
+</g>
+<g >
+<title>__memmove_avx_unaligned_erms (5 samples, 0.16%)</title><rect x="1440.0" y="277" width="2.9" height="15.0" fill="rgb(231,151,28)" rx="2" ry="2" />
+<text  x="1443.04" y="287.5" ></text>
+</g>
+<g >
+<title>asm_sysvec_apic_timer_interrupt (2 samples, 0.07%)</title><rect x="1476.6" y="277" width="1.2" height="15.0" fill="rgb(236,145,34)" rx="2" ry="2" />
+<text  x="1479.60" y="287.5" ></text>
+</g>
+</g>
+</svg>

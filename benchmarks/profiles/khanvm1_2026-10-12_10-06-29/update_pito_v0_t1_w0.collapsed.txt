@@ -1,0 +1,14 @@
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:13 13
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:13;ecs_get_raw@pito_ecs.h:1887 1
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:13;ecs_get_raw@pito_ecs.h:1888 22
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1899 44
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1899;pthread_mutex_lock 279
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1899;pthread_mutex_lock@plt 16
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1904;ecs_get_raw@pito_ecs.h:1890 82
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1906 37
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1906;pthread_mutex_unlock 120
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1906;pthread_mutex_unlock@plt 15
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1908 9
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:17 29
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:17;bench_work@bench.h:82 7
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:7 33

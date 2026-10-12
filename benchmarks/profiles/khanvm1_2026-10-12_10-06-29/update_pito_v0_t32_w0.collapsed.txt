@@ -1,0 +1,8 @@
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1899 1
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1899;pthread_mutex_lock 112
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1899;pthread_mutex_lock;asm_sysvec_apic_timer_interrupt;sysvec_apic_timer_interrupt;__sysvec_apic_timer_interrupt;hrtimer_interrupt;__hrtimer_run_queues;tick_nohz_handler;update_process_times;sched_tick;task_tick_fair;update_cfs_group;update_entity_lag 1
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1899;pthread_mutex_unlock;asm_sysvec_apic_timer_interrupt 1
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1906 3
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1906;pthread_mutex_unlock 85
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:14;ecs_get@pito_ecs.h:1906;pthread_mutex_unlock;asm_sysvec_apic_timer_interrupt;sysvec_apic_timer_interrupt;__sysvec_apic_timer_interrupt;hrtimer_interrupt;__hrtimer_run_queues;tick_nohz_handler;update_process_times;sched_tick;perf_event_task_tick 1
+run_systems@bench_picto.h:60;ecs_run_system@pito_ecs.h:2230;update_system@owned_update.c:7 1
