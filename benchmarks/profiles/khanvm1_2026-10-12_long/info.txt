@@ -1,5 +1,5 @@
 commit: 4cc0f53
 host: khanvm1, AMD EPYC-Milan Processor, 32 hardware threads, Linux 7.0.0-27-generic
 compiler: cc (Ubuntu 15.2.0-16ubuntu1) 15.2.0
-flags: -std=gnu11 -O3 -g -DNDEBUG -fno-omit-frame-pointer -pthread -I.. -DPITO_ECS_OWNED_DELETE_ATOMIC=1 (pito_atomic adds -DPITO_ECS_OWNED_DELETE_ATOMIC=1)
+flags: -std=gnu11 -O3 -g -DNDEBUG -fno-omit-frame-pointer -pthread -I.. (pito_atomic adds -DPITO_ECS_OWNED_DELETE_ATOMIC=1)
 duration: 300s per profile

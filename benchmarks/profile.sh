@@ -19,7 +19,8 @@ trap 'rm -rf "$SCRATCH"' EXIT
 TMP=$SCRATCH/$NAME
 mkdir -p "$DIR"
 
-CFLAGS="-std=gnu11 -O3 -g -DNDEBUG -fno-omit-frame-pointer -pthread -I.."
+BASE_CFLAGS="-std=gnu11 -O3 -g -DNDEBUG -fno-omit-frame-pointer -pthread -I.."
+CFLAGS=$BASE_CFLAGS
 case $LIB in
     pito)        ;;
     pito_atomic) CFLAGS="$CFLAGS -DPITO_ECS_OWNED_DELETE_ATOMIC=1" ;;
@@ -37,7 +38,7 @@ fi
 commit: $(git rev-parse --short HEAD)$(git diff --quiet HEAD -- .. || echo ' (dirty)')
 host: $(hostname -s), $CPU, $(getconf _NPROCESSORS_ONLN) hardware threads, $(uname -sr)
 compiler: $(cc --version | head -1)
-flags: $CFLAGS (pito_atomic adds -DPITO_ECS_OWNED_DELETE_ATOMIC=1)
+flags: $BASE_CFLAGS (pito_atomic adds -DPITO_ECS_OWNED_DELETE_ATOMIC=1)
 duration: ${DURATION}s per profile
 EOF
 
