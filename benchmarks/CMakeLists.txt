@@ -42,10 +42,16 @@ set(BENCH_FLAGS "${CMAKE_C_FLAGS} ${CMAKE_C_FLAGS_${BUILD_TYPE}}")
 
 file(MAKE_DIRECTORY ${CMAKE_SOURCE_DIR}/results)
 
+execute_process(COMMAND git rev-parse HEAD
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                OUTPUT_VARIABLE BENCH_COMMIT
+                OUTPUT_STRIP_TRAILING_WHITESPACE)
+
 function(add_bench_executable target source flags)
     add_executable(${target} ${source})
     target_compile_definitions(${target} PRIVATE "BENCH_FLAGS=\"${flags}\""
-                                                 "BENCH_RESULTS_DIR=\"${CMAKE_SOURCE_DIR}/results\"")
+                                                 "BENCH_RESULTS_DIR=\"${CMAKE_SOURCE_DIR}/results\""
+                                                 "BENCH_COMMIT=\"${BENCH_COMMIT}\"")
     target_link_libraries(${target} PRIVATE Threads::Threads m)
 endfunction()
 

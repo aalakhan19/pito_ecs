@@ -21,6 +21,10 @@
 #define BENCH_FLAGS "unknown"
 #endif
 
+#ifndef BENCH_COMMIT
+#define BENCH_COMMIT "unknown"
+#endif
+
 #ifndef BENCH_RESULTS_DIR
 #define BENCH_RESULTS_DIR "results"
 #endif
@@ -129,7 +133,7 @@ static void measure(bench_t* b, int thread_count)
         samples[n - 1] = b->def->run_once(b, thread_count);
 
         fprintf(b->csv,
-                "%s,%s,%s,\"%s\",%d,%zu,%d,%.6f\n",
+                "%s,%s,%s,\"%s\",%d,%zu,%d,%.6f,%s\n",
                 b->csv_prefix,
                 b->def->lib,
                 b->def->name,
@@ -137,7 +141,8 @@ static void measure(bench_t* b, int thread_count)
                 thread_count,
                 b->work_iterations,
                 n,
-                samples[n - 1]);
+                samples[n - 1],
+                BENCH_COMMIT);
 
         if (n >= MIN_RUNS && ci_width(summarize(samples, n)) <= CI_TARGET)
             break;
@@ -203,7 +208,7 @@ static FILE* csv_open(bench_t* b)
              b->system_count,
              b->entity_count);
 
-    printf("%s: %s (%ld hardware threads), %s %s %s, %s, flags:%s\n"
+    printf("%s: %s (%ld hardware threads), %s %s %s, %s, flags:%s, commit %s\n"
            "%d systems x %zu entities, writing %s\n",
            host,
            cpu,
@@ -213,13 +218,14 @@ static FILE* csv_open(bench_t* b)
            os.machine,
            __VERSION__,
            BENCH_FLAGS,
+           BENCH_COMMIT,
            b->system_count,
            b->entity_count,
            path);
 
     if (ftell(f) == 0)
         fputs("host,cpu,hardware_threads,os,compiler,flags,systems,entities,"
-              "lib,bench,variant,threads,work_iterations,run,ms\n",
+              "lib,bench,variant,threads,work_iterations,run,ms,commit\n",
               f);
 
     return f;
