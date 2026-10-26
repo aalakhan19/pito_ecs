@@ -5,6 +5,7 @@
 
 #include <math.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -39,10 +40,30 @@
 static const size_t work_levels[] = { 0, 10, 50, 500 };
 #define WORK_LEVEL_COUNT 4
 
+#define MAX_PARAMS 6
+
 typedef struct
 {
     double value;
 } value_t;
+
+// https://en.wikipedia.org/wiki/Xorshift#Initialization
+static inline uint64_t bench_mix64(uint64_t* s)
+{
+    uint64_t result = (*s += 0x9E3779B97F4A7C15u);
+    result          = (result ^ (result >> 30)) * 0xBF58476D1CE4E5B9u;
+    result          = (result ^ (result >> 27)) * 0x94D049BB133111EBu;
+    return result ^ (result >> 31);
+}
+
+// https://en.wikipedia.org/wiki/Xorshift
+static inline uint64_t bench_next_random(uint64_t* state)
+{
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    return *state;
+}
 
 typedef struct
 {
@@ -61,7 +82,19 @@ typedef struct
     bool serial_only;
     double (*run_once)(bench_t* b, int thread_count); // returns the timed ms, setup excluded
     void (*cleanup)(bench_t* b);
+    const char* param_name;
+    size_t params[MAX_PARAMS];
+    int param_count;
 } bench_def_t;
+
+#define BENCH_PARAMS(def, name, ...)                                                               \
+    do                                                                                             \
+    {                                                                                              \
+        size_t values_[]  = { __VA_ARGS__ };                                                       \
+        (def).param_name  = name;                                                                  \
+        (def).param_count = (int)(sizeof(values_) / sizeof(values_[0]));                           \
+        memcpy((def).params, values_, sizeof(values_));                                            \
+    } while (0)
 
 struct bench_s
 {
@@ -70,6 +103,7 @@ struct bench_s
     size_t entity_count; // pro system
     size_t work_iterations;
     int variant;
+    size_t param;
     FILE* csv;
     char csv_prefix[1024];
 };
@@ -87,6 +121,23 @@ static inline double bench_work(double acc, size_t iterations)
         acc = acc * 0.999999 + 1.0;
 
     return acc;
+}
+
+static inline size_t uneven_count(const bench_t* b, int system)
+{
+    if (b->param == 0 || b->system_count == 1)
+        return b->entity_count;
+
+    size_t total = b->entity_count * b->system_count;
+    size_t rest  = total * (100 - b->param) / 100 / (b->system_count - 1);
+
+    return system == 0 ? total - rest * (b->system_count - 1) : rest;
+}
+
+static inline size_t bank_accounts(const bench_t* b)
+{
+    size_t accounts = b->entity_count * b->param / 100;
+    return accounts < 2 ? 2 : accounts;
 }
 
 static int compare_double(const void* a, const void* b)
@@ -132,8 +183,12 @@ static void measure(bench_t* b, int thread_count)
     {
         samples[n - 1] = b->def->run_once(b, thread_count);
 
+        char param[64] = "";
+        if (b->def->param_count > 0)
+            snprintf(param, sizeof(param), "%s=%zu", b->def->param_name, b->param);
+
         fprintf(b->csv,
-                "%s,%s,%s,\"%s\",%d,%zu,%d,%.6f,%s\n",
+                "%s,%s,%s,\"%s\",%d,%zu,%d,%.6f,%s,%s\n",
                 b->csv_prefix,
                 b->def->lib,
                 b->def->name,
@@ -142,7 +197,8 @@ static void measure(bench_t* b, int thread_count)
                 b->work_iterations,
                 n,
                 samples[n - 1],
-                BENCH_COMMIT);
+                BENCH_COMMIT,
+                param);
 
         if (n >= MIN_RUNS && ci_width(summarize(samples, n)) <= CI_TARGET)
             break;
@@ -225,7 +281,7 @@ static FILE* csv_open(bench_t* b)
 
     if (ftell(f) == 0)
         fputs("host,cpu,hardware_threads,os,compiler,flags,systems,entities,"
-              "lib,bench,variant,threads,work_iterations,run,ms,commit\n",
+              "lib,bench,variant,threads,work_iterations,run,ms,commit,param\n",
               f);
 
     return f;
@@ -252,6 +308,7 @@ static int bench_main(int argc, char** argv, const bench_def_t* def)
         int threads       = argc > 3 ? atoi(argv[3]) : 1;
         b.work_iterations = argc > 4 ? strtoul(argv[4], NULL, 10) : 0;
         double seconds    = argc > 5 ? atof(argv[5]) : 10;
+        b.param           = argc > 6 ? strtoul(argv[6], NULL, 10) : def->params[0];
 
         if (b.variant < 0 || b.variant > 2 || !def->variants[b.variant] || threads < 1 ||
             threads > (def->serial_only ? 1 : max_threads))
@@ -279,24 +336,34 @@ static int bench_main(int argc, char** argv, const bench_def_t* def)
 
     int last_threads = def->serial_only ? 1 : max_threads;
 
+    int param_count = def->param_count > 0 ? def->param_count : 1;
+
     for (int v = 0; v < 3 && def->variants[v]; v++)
     {
         b.variant = v;
 
-        for (int threads = 1; threads <= last_threads; threads *= 2)
+        for (int p = 0; p < param_count; p++)
         {
-            printf("%s %s %s %d threads, work:", def->lib, def->name, def->variants[v], threads);
+            b.param = def->params[p];
 
-            for (int w = 0; w < WORK_LEVEL_COUNT; w++)
+            for (int threads = 1; threads <= last_threads; threads *= 2)
             {
-                printf(" %zu", work_levels[w]);
-                fflush(stdout);
+                printf("%s %s %s", def->lib, def->name, def->variants[v]);
+                if (def->param_count > 0)
+                    printf(" %s=%zu", def->param_name, b.param);
+                printf(" %d threads, work:", threads);
 
-                b.work_iterations = work_levels[w];
-                measure(&b, threads);
+                for (int w = 0; w < WORK_LEVEL_COUNT; w++)
+                {
+                    printf(" %zu", work_levels[w]);
+                    fflush(stdout);
+
+                    b.work_iterations = work_levels[w];
+                    measure(&b, threads);
+                }
+
+                printf("\n");
             }
-
-            printf("\n");
         }
     }
 
